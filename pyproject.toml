@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "nonebot-plugin-randpic"
+version = "0.0.1"
+description = "一个通过指令随机发送你存储的图片的插件"
+authors = ["HuParry <huparry@outlook.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{include = "nonebot_plugin_randpic"}]
+homepage = "https://github.com/HuParry/nonebot-plugin-randpic"
+repository = "https://github.com/HuParry/nonebot-plugin-randpic"
+
+
+[tool.poetry.dependencies]
+python = ">=3.8"
+nonebot2 = ">=2.0.0"
+nonebot-adapter-onebot = ">=2.1.5"
+httpx = ">=0.20.0,<1.0.0"
+asyncio = ">=3.4.3"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

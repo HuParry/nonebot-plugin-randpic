@@ -8,7 +8,7 @@ import os
 from nonebot.plugin import PluginMetadata
 from nonebot.params import Arg
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, List, Set
 from nonebot import get_driver
 from nonebot.log import logger
 import asyncio
@@ -26,9 +26,10 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"nonebot.adapters.onebot.v11"},
 )
 
-randpic_command_set = Config.parse_obj(get_driver().config.dict()).randpic_command_set
+randpic_command_list: List[str] = Config.parse_obj(get_driver().config.dict()).randpic_command_list
+randpic_command_set: Set[str] = set(randpic_command_list)
 
-randpic_command_tuple: Tuple[str] = tuple(randpic_command_set)  # 形成指令元组
+randpic_command_tuple: Tuple[str,...] = tuple(randpic_command_set)  # 形成指令元组
 randpic_command_add_tuple = tuple("添加" + tup for tup in randpic_command_tuple)  # 形成添加指令元组
 
 randpic_path = Path() / "data" / "randpic"

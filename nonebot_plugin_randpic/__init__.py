@@ -35,6 +35,7 @@ randpic_command_add_tuple = tuple("添加" + tup for tup in randpic_command_tupl
 randpic_path = Path() / "data" / "randpic"
 randpic_command_path_tuple = tuple(randpic_path / command for command in randpic_command_tuple)  # 形成指令文件夹路径元组
 
+hash_str = 'vtw3srzmcn0vqp_'
 randpic_filename: str = 'randpic_{command}_{index}'
 
 connection: sqlite3.Connection
@@ -62,7 +63,7 @@ async def create_file():
     global connection
     connection = sqlite3.connect(randpic_path / "data.db")
     cursor = connection.cursor()
-    # 没有表创建表
+    # 创建表
     for command in randpic_command_tuple:
         cursor.execute('DROP table if exists Pic_of_{command};'.format(command=command))
         cursor.execute('''
@@ -78,19 +79,24 @@ async def create_file():
         global randpic_filename
         path: Path = randpic_command_path_tuple[index]
         randpic_file_list = os.listdir(path)
-        randpic_file_list.sort()
 
         for i in range(len(randpic_file_list)):
             filename = randpic_file_list[i]
             filename_without_extension, filename_extension = os.path.splitext(filename)
-            new_filename = randpic_filename.format(command=randpic_command_tuple[index],
+            hash_new_filename = hash_str+randpic_filename.format(command=randpic_command_tuple[index],
                                                    index=str(i+1))+(filename_extension if filename_extension != '' else '.jpg')
-            if filename_without_extension != randpic_filename:
-                os.rename(path / filename, path / new_filename)
+            os.rename(path / filename, path / hash_new_filename)
+
+        # 将哈希化的文件名订正为规范名
+        randpic_file_list = os.listdir(path)
+        for i in range(len(randpic_file_list)):
+            hash_filename = randpic_file_list[i]
+            new_filename = hash_filename.replace(hash_str, '')
+            os.rename(path / hash_filename, path / new_filename)
+
 
         # 将图片信息写入数据库
         randpic_file_list = os.listdir(path)
-        randpic_file_list.sort()
         for i in range(len(randpic_file_list)):
             filename: str = randpic_file_list[i]
             with (path / filename).open('rb') as f:

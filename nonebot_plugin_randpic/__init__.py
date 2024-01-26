@@ -1,4 +1,4 @@
-from .config import Config
+
 from httpx import AsyncClient
 
 from nonebot.adapters.onebot.v11 import MessageSegment, Message, Event
@@ -16,6 +16,8 @@ import hashlib
 import sqlite3
 from nonebot.params import Fullmatch
 
+from .config import Config
+
 __plugin_meta__ = PluginMetadata(
     name="随机发送图片",
     description="发送自定义指令后bot会随机发出一张你所存储的图片",
@@ -25,14 +27,15 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     supported_adapters={"nonebot.adapters.onebot.v11"},
 )
+config_dict = Config.parse_obj(get_driver().config.dict())
+randpic_command_list: List[str] = config_dict.randpic_command_list
 
-randpic_command_list: List[str] = Config.parse_obj(get_driver().config.dict()).randpic_command_list
 randpic_command_set: Set[str] = set(randpic_command_list)
 
 randpic_command_tuple: Tuple[str,...] = tuple(randpic_command_set)  # 形成指令元组
 randpic_command_add_tuple = tuple("添加" + tup for tup in randpic_command_tuple)  # 形成添加指令元组
 
-randpic_path = Path() / "data" / "randpic"
+randpic_path = Path(config_dict.randpic_store_dir_path)
 randpic_command_path_tuple = tuple(randpic_path / command for command in randpic_command_tuple)  # 形成指令文件夹路径元组
 
 hash_str = 'vtw3srzmcn0vqp_'

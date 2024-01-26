@@ -2,7 +2,7 @@
 name = "nonebot-plugin-randpic"
 version = "0.0.1"
 description = "一个通过指令随机发送你存储的图片的插件"
-authors = ["HuParry <huparry@outlook.com>"]
+authors = ["HuParry <hu_parry@qq.com>"]
 license = "MIT"
 readme = "README.md"
 packages = [{include = "nonebot_plugin_randpic"}]

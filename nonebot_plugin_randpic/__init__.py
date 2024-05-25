@@ -54,10 +54,10 @@ async def _():
     logger.info("文件检查完成，欢迎使用插件！")
 
 
-@driver.on_shutdown
-async def close_connection():
-    logger.info("正在关闭数据库")
-    await connection.close()
+# @driver.on_shutdown
+# async def close_connection():
+#     logger.info("正在关闭数据库")
+#     await connection.close()
 
 
 # 创建所需文件夹和数据库

@@ -10,3 +10,4 @@ from nonebot_plugin_localstore import get_data_dir
 class Config(BaseModel, extra=Extra.ignore):
     randpic_command_list: List[str] = ["capoo"]  # 指令列表
     randpic_store_dir_path: str = get_data_dir("nonebot_plugin_randpic")  # 用户自定义图片存储文件夹
+    randpic_banner_group: List[int] = []  # 禁用群组列表

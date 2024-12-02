@@ -1,6 +1,6 @@
 from httpx import AsyncClient
 
-from nonebot.adapters.onebot.v11 import MessageSegment, Message, Event
+from nonebot.adapters.onebot.v11 import MessageSegment, Message, Event, GroupMessageEvent
 from nonebot.adapters.onebot.v11 import GROUP, GROUP_ADMIN, GROUP_OWNER
 from nonebot.plugin import on_fullmatch
 import os
@@ -37,6 +37,8 @@ randpic_command_add_tuple = tuple("添加" + tup for tup in randpic_command_tupl
 
 randpic_path = Path(config_dict.randpic_store_dir_path)
 randpic_command_path_tuple = tuple(randpic_path / command for command in randpic_command_tuple)  # 形成指令文件夹路径元组
+
+randpic_banner_group = config_dict.randpic_banner_group
 
 hash_str = 'vtw3srzmcn0vqp_'
 randpic_filename: str = 'randpic_{command}_{index}'
@@ -125,7 +127,9 @@ picture = on_fullmatch(randpic_command_tuple, permission=GROUP, priority=1, bloc
 
 
 @picture.handle()
-async def pic(event: Event):
+async def pic(event: GroupMessageEvent):
+    if event.group_id in randpic_banner_group:
+        return
     global connection
     cursor = await connection.cursor()
     command = str(event.get_message()).strip()

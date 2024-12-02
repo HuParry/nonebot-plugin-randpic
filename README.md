@@ -99,6 +99,7 @@ _✨ 一个发送指令就能让你的 bot 发出对应指令的图片的插件 
 |:----------------------:|:--:|:--------:|:---------------------------------------:|
 |  randpic_command_list  | 否  | ["capoo"] |      预设的触发指令，默认是capoo，即capoo触发发送图片      |
 | randpic_store_dir_path | 否  |     get_data_dir("nonebot_plugin_randpic")     | 图片存储的路径，用户自定义路径，不定义路径则由localstore插件定义路径 |
+|  randpic_banner_group  | 否  | [] |               不触发发图功能的群聊                |
 
 例如这样配置：
 ```

@@ -1,5 +1,5 @@
 from httpx import AsyncClient
-
+import ssl
 from nonebot.adapters.onebot.v11 import MessageSegment, Message, Event, GroupMessageEvent
 from nonebot.adapters.onebot.v11 import GROUP, GROUP_ADMIN, GROUP_OWNER
 from nonebot.plugin import on_fullmatch
@@ -161,7 +161,9 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
             continue
         pic_url = pic_name.data['url']
 
-        async with AsyncClient() as client:
+        ssl_context = ssl.create_default_context()
+        ssl_context.set_ciphers("DEFAULT")
+        async with AsyncClient(verify=ssl_context) as client:
             resp = await client.get(pic_url, timeout=5.0)
 
         try:

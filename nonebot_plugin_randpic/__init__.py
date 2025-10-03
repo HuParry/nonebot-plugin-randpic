@@ -1,3 +1,5 @@
+import time
+import uuid
 from httpx import AsyncClient
 import ssl
 from nonebot.adapters.onebot.v11 import MessageSegment, Message, Event, GroupMessageEvent
@@ -6,16 +8,16 @@ from nonebot.plugin import on_fullmatch
 import os
 from nonebot.plugin import PluginMetadata
 from nonebot.params import Arg
-from pathlib import Path
-from typing import Tuple, List, Set
 from nonebot import get_driver
 from nonebot.log import logger
-import asyncio
 import hashlib
 import aiosqlite
 from nonebot.params import Fullmatch
 
-from .config import Config
+from .config import *
+from .ali_oss import *
+from .compress import compress_image_from_bytes
+from .web import StaticImageGalleryGenerator
 
 __plugin_meta__ = PluginMetadata(
     name="随机发送图片",
@@ -27,20 +29,14 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"nonebot.adapters.onebot.v11"},
 )
 
-config_dict = Config.parse_obj(get_driver().config.dict())
-randpic_command_list: List[str] = config_dict.randpic_command_list
-
-randpic_command_set: Set[str] = set(randpic_command_list)
-
-randpic_command_tuple: Tuple[str, ...] = tuple(randpic_command_set)  # 形成指令元组
+randpic_command_tuple: Tuple[str, ...] = tuple(set(randpic_command_list))  # 形成指令元组
 randpic_command_add_tuple = tuple("添加" + tup for tup in randpic_command_tuple)  # 形成添加指令元组
+randpic_path = Path(randpic_store_dir_path)
+randpic_img_path = randpic_path / 'img'
+randpic_database_path = randpic_path / 'database'
+randpic_command_path_tuple = tuple(randpic_img_path / command for command in randpic_command_tuple)  # 形成指令文件夹路径元组
 
-randpic_path = Path(config_dict.randpic_store_dir_path)
-randpic_command_path_tuple = tuple(randpic_path / command for command in randpic_command_tuple)  # 形成指令文件夹路径元组
 
-randpic_banner_group = config_dict.randpic_banner_group
-
-hash_str = 'vtw3srzmcn0vqp_'
 randpic_filename: str = 'randpic_{command}_{index}'
 
 connection: aiosqlite.Connection
@@ -52,8 +48,8 @@ driver = get_driver()
 @driver.on_startup
 async def _():
     logger.info("正在检查文件...")
-    await asyncio.create_task(create_file())
-    logger.info("文件检查完成，欢迎使用插件！")
+    await create_file()
+    logger.info("文件检查完成，欢迎使用！")
 
 
 # @driver.on_shutdown
@@ -72,7 +68,9 @@ async def create_file():
     # 创建数据库，没有数据表创建数据表
 
     global connection
-    connection = await aiosqlite.connect(randpic_path / "data.db")
+    if not randpic_database_path.exists():
+        randpic_database_path.mkdir(parents=True, exist_ok=True)
+    connection = await aiosqlite.connect(randpic_database_path / "data.db")
     cursor = await connection.cursor()
 
     # 创建表
@@ -90,31 +88,40 @@ async def create_file():
     for index in range(len(randpic_command_path_tuple)):
         global randpic_filename
         path: Path = randpic_command_path_tuple[index]
+        command = randpic_command_tuple[index]
         randpic_file_list = os.listdir(path)
 
+        # 文件名哈希化
+        def get_uuid(command: str):
+            return uuid.uuid5(uuid.uuid4(), command).hex
         for i in range(len(randpic_file_list)):
             filename = randpic_file_list[i]
             filename_without_extension, filename_extension = os.path.splitext(filename)
-            hash_new_filename = hash_str + randpic_filename.format(command=randpic_command_tuple[index],
-                                                                   index=str(i + 1)) + (
-                                    filename_extension if filename_extension != '' else '.jpg')
+            hash_new_filename = get_uuid(command) + (filename_extension if filename_extension else '.jpg')
             os.rename(path / filename, path / hash_new_filename)
+            print(filename, ' -> ', hash_new_filename)
 
         # 将哈希化的文件名订正为规范名
         randpic_file_list = os.listdir(path)
         for i in range(len(randpic_file_list)):
             hash_filename = randpic_file_list[i]
-            new_filename = hash_filename.replace(hash_str, '')
+            filename_without_extension, filename_extension = os.path.splitext(hash_filename)
+            new_filename = randpic_filename.format( command=randpic_command_tuple[index],
+                        index=str(i + 1).zfill(10) ) + (filename_extension if filename_extension else '.jpg')
             os.rename(path / hash_filename, path / new_filename)
 
         # 将图片信息写入数据库
-        randpic_file_list = os.listdir(path)
+        randpic_file_list = sorted( os.listdir(path) )
         for i in range(len(randpic_file_list)):
-            filename: str = randpic_file_list[i]
+            filename = randpic_file_list[i]
+
             with (path / filename).open('rb') as f:
                 data = f.read()
-            fmd5 = hashlib.md5(data).hexdigest()
+            data = compress_image_from_bytes(data)
+            with (path / filename).open('wb') as f:
+                f.write(data)
 
+            fmd5 = hashlib.md5(data).hexdigest()
             cursor = await connection.cursor()
             command: str = randpic_command_tuple[index]
             await cursor.execute(
@@ -138,7 +145,7 @@ async def pic(event: GroupMessageEvent):
     if data is None:
         await picture.finish('当前还没有图片!')
     file_name = data[0]
-    img = randpic_path / file_name
+    img = randpic_img_path / file_name
     try:
         await picture.send(MessageSegment.image(img))
     except Exception as e:
@@ -186,17 +193,42 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
             await add.send(pic_name + Message('\n这张已经有了，不能重复添加！'))
         else:
             without_extension, extension = os.path.splitext(pic_url)
-            randpic_cur_picnum = len(os.listdir(randpic_path / command))
-            file_name = (randpic_filename.format(command=command, index=str(randpic_cur_picnum + 1))
+            randpic_cur_picnum = len(os.listdir(randpic_img_path / command))
+            file_name = (randpic_filename.format(command=command, index=str(randpic_cur_picnum + 1).zfill(10))
                          + (extension if extension != '' else '.jpg'))
-            file_path = randpic_path / command / file_name
+            file_path = randpic_img_path / command / file_name
 
             try:
+                data = compress_image_from_bytes(data)   # 若图片超规格，压缩图片
                 with file_path.open("wb") as f:
                     f.write(data)
                 await cursor.execute('insert into Pic_of_{command}(md5, img_url) values (?, ?)'.format(command=command),
                                      (fmd5, str(Path() / command / file_name)))
-                await add.send(pic_name + Message("\n导入成功！"), at_sender=True)
             except Exception as e:
                 logger.warning(e)
-                await add.send(pic_name + Message("\n导入失败！"), at_sender=True)
+                await add.finish(pic_name + Message("\n导入失败！"), at_sender=True)
+
+            msg = "\n导入成功！"
+            if isOss:
+                msg += f'可去 {endpoint}/{command}/ 查看'
+                # StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site()
+                StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(command, file_name)
+                await OSSUploaderV2().upload_file(str(randpic_path/ 'public' / command / 'index.html'), f'{command}/index.html') # 修改index.html文件
+                await OSSUploaderV2().upload_file(str(randpic_path / 'public' / 'index.html'), 'index.html')
+                await OSSUploaderV2().upload_file(file_path, f'{command}/{file_name}') # 上传新增的图片到OSS
+            await add.finish(pic_name + Message(msg), at_sender=True)
+
+oss = on_fullmatch('上传oss', ignorecase=True, permission=GROUP_ADMIN | GROUP_OWNER, priority=1, block=True, )
+@oss.handle()
+async def handle_oss(event: GroupMessageEvent) -> None:
+    if not isOss:
+        return
+    await oss.send('正在上传至OSS...')
+    start_time = time.time()
+
+    StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site()
+    await OSSUploaderV2().upload_folder(str(randpic_path / 'public'))
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    await oss.finish(f'上传完成，用时: {elapsed_time:.2f}秒')

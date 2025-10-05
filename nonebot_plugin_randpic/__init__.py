@@ -94,20 +94,19 @@ async def create_file():
         # 文件名哈希化
         def get_uuid(command: str):
             return uuid.uuid5(uuid.uuid4(), command).hex
+        hash_str = get_uuid(command)
         for i in range(len(randpic_file_list)):
             filename = randpic_file_list[i]
             filename_without_extension, filename_extension = os.path.splitext(filename)
-            hash_new_filename = get_uuid(command) + (filename_extension if filename_extension else '.jpg')
+            format_str = randpic_filename.format( command=randpic_command_tuple[index], index=str(i + 1).zfill(10) )
+            hash_new_filename =  f"{format_str}_{hash_str}{(filename_extension if filename_extension else '.jpg')}"
             os.rename(path / filename, path / hash_new_filename)
-            print(filename, ' -> ', hash_new_filename)
 
         # 将哈希化的文件名订正为规范名
         randpic_file_list = os.listdir(path)
         for i in range(len(randpic_file_list)):
             hash_filename = randpic_file_list[i]
-            filename_without_extension, filename_extension = os.path.splitext(hash_filename)
-            new_filename = randpic_filename.format( command=randpic_command_tuple[index],
-                        index=str(i + 1).zfill(10) ) + (filename_extension if filename_extension else '.jpg')
+            new_filename = hash_filename.replace(f"_{hash_str}", '')
             os.rename(path / hash_filename, path / new_filename)
 
         # 将图片信息写入数据库

@@ -189,3 +189,10 @@ randpic_oss_access_key_secret="xxxxxxxxxxxxxxxxxxxxx"
 - [X] 以阿里云OSS对象存储搭建静态网页，便于浏览器查看图片
 - [ ] 完善权限管理机制，采用更详细的权限管理，避免插件滥用
 - [ ] 添加智能识图选项（调用api），避免添加违禁图导致被风控
+
+## 鸣谢
+感谢以下开发者作出的贡献：
+
+<a href="https://github.com/HuParry/nonebot-plugin-randpic/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=HuParry/nonebot-plugin-randpic"  alt="contributors"/>
+</a>

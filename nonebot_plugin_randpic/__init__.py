@@ -13,6 +13,7 @@ from nonebot.log import logger
 import hashlib
 import aiosqlite
 from nonebot.params import Fullmatch
+from urllib import parse
 
 from .config import *
 from .ali_oss import *
@@ -209,7 +210,7 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
 
             msg = "\n导入成功！"
             if isOss:
-                msg += f'可去 {endpoint}/{command}/ 查看'
+                msg += f'可去 {endpoint}/{parse.quote(command)}/ 查看'
                 # StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site()
                 StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(command, file_name)
                 await OSSUploaderV2().upload_file(str(randpic_path/ 'public' / command / 'index.html'), f'{command}/index.html') # 修改index.html文件

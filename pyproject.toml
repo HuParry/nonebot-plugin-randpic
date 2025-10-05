@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nonebot-plugin-randpic"
-version = "1.0.0"
+version = "1.0.1"
 description = "一个通过指令随机发送你存储的图片的nonebot2插件"
 authors = ["HuParry <hu_parry@qq.com>"]
 license = "MIT"

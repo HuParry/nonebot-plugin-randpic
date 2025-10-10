@@ -320,7 +320,7 @@ class StaticImageGalleryGenerator:
             <img src="{image}" 
                  alt="{image}" 
                  class="image-preview"
-                 onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                 onerror="this.style.display='none'; this.nextElementSibling.style.display='block'; loading='lazy'">
             <div style="display:none; padding: 20px; text-align: center; color: #666;">
                 图片无法显示
             </div>

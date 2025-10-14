@@ -128,11 +128,12 @@ bucket的访问权限至少要设置为公共读，否则通过域名也无法�
 |  randpic_command_list  | 否  |               ["capoo"]                |      预设的触发指令，默认是capoo，即capoo触发发送图片      |
 | randpic_store_dir_path | 否  | get_data_dir("nonebot_plugin_randpic") | 图片存储的路径，用户自定义路径，不定义路径则由localstore插件定义路径 |
 |  randpic_banner_group  | 否  |                   []                   |               不触发发图功能的群聊                |
-|  randpic_endpoint  | 否  |                  None                  |      填写自定义域名，域名尾部不用加/ （后续实现相关功能）      |
-|  randpic_bucket  | 否  |                  None                  |      阿里云OSS对象存储空间名称(bucket)      |
-| randpic_region | 否 | None | 阿里云OSS对象存储bucket所在地域 |
-| randpic_oss_access_key_id | 否 | None | 阿里云用户AccessKey ID |
-| randpic_oss_access_key_secret | 否 | None | 阿里云用户AccessKey Secret |
+|  randpic_endpoint  | 否  |                  None                  |       填写自定义域名，域名尾部不用加/ （后续实现相关功能）       |
+|  randpic_bucket  | 否  |                  None                  |         阿里云OSS对象存储空间名称(bucket)          |
+| randpic_region | 否 |                  None                  |          阿里云OSS对象存储bucket所在地域           |
+| randpic_oss_access_key_id | 否 |                  None                  |            阿里云用户AccessKey ID            |
+| randpic_oss_access_key_secret | 否 |                  None                  |          阿里云用户AccessKey Secret          |
+| randpic_oss_no_upload_list | 否 |                   []                   |    不上传到OSS的指令文件夹列表，该列表中对应的指令均不上传至OSS    |
 
 例如这样配置：
 ```

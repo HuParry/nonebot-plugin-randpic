@@ -8,7 +8,7 @@ class StaticImageGalleryGenerator:
         self.output_folder = Path(output_folder)
         self.supported_formats = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.svg'}
 
-    def get_all_images_with_folders(self):
+    def get_all_images_with_folders(self, no_upload_oss_list):
         """获取所有文件夹及其包含的图片文件"""
         result = {}
 
@@ -20,6 +20,10 @@ class StaticImageGalleryGenerator:
                     folder_key = ''
                 else:
                     folder_key = rel_path
+
+                # 不上传oss的文件夹跳过
+                if folder_key in no_upload_oss_list:
+                    continue
 
                 # 过滤图片文件
                 image_files = []
@@ -341,9 +345,9 @@ class StaticImageGalleryGenerator:
 
         return html
 
-    def generate_static_site(self):
+    def generate_static_site(self, no_upload_oss_list):
         """生成静态网站"""
-        all_folders = self.get_all_images_with_folders()
+        all_folders = self.get_all_images_with_folders(no_upload_oss_list)
         import shutil
         if self.output_folder.exists():
             shutil.rmtree(self.output_folder)
@@ -376,6 +380,8 @@ class StaticImageGalleryGenerator:
             if rel_path == '.':
                 target_dir = self.output_folder
             else:
+                if rel_path in no_upload_oss_list:
+                    continue
                 target_dir = self.output_folder / rel_path
                 target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -386,8 +392,10 @@ class StaticImageGalleryGenerator:
                     # 复制文件（可以改为硬链接以节省空间）
                     shutil.copy2(source_file, target_file)
 
-    def generate_command_html(self, folder_key: str, file_name: str):
-        all_folders = self.get_all_images_with_folders()
+    def generate_command_html(self, folder_key: str, file_name: str, no_upload_oss_list):
+        if folder_key in no_upload_oss_list:
+            return
+        all_folders = self.get_all_images_with_folders(no_upload_oss_list)
         folder_info = all_folders[folder_key]
         folder_html = self.generate_folder_html(folder_info, folder_key)
 
@@ -414,6 +422,3 @@ if __name__ == "__main__":
     # 源文件夹路径和输出文件夹路径
     source_folder = "C:\\Users\\hu_pa\\Desktop\\randpic"  # 源图片文件夹
     output_folder = "C:\\Users\\hu_pa\\Desktop\\nonebot\\nonebot-plugin-randpic\\static"  # 输出静态网站文件夹
-
-    generator = StaticImageGalleryGenerator(source_folder, output_folder)
-    generator.generate_static_site()

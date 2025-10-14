@@ -17,6 +17,7 @@ class Config(BaseModel, extra='ignore'):
     randpic_region: str = None                 # Bucket所在地域
     randpic_oss_access_key_id: str = None      # 阿里云用户AccessKey ID
     randpic_oss_access_key_secret: str = None  # 阿里云用户AccessKey Secret
+    randpic_oss_no_upload_list: List[str] = [] # 不上传oss的指令数组
 
 
 config_dict = Config.model_validate(get_driver().config.dict())
@@ -29,3 +30,4 @@ randpic_bucket = config_dict.randpic_bucket
 randpic_region = config_dict.randpic_region
 randpic_oss_access_key_id = config_dict.randpic_oss_access_key_id
 randpic_oss_access_key_secret = config_dict.randpic_oss_access_key_secret
+randpic_oss_no_upload_list = config_dict.randpic_oss_no_upload_list

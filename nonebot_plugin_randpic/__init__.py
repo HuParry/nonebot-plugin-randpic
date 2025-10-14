@@ -209,10 +209,10 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
                 await add.finish(pic_name + Message("\n导入失败！"), at_sender=True)
 
             msg = "\n导入成功！"
-            if isOss:
+            if isOss and command not in randpic_oss_no_upload_list:
                 msg += f'可去 {endpoint}/{parse.quote(command)}/ 查看'
                 # StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site()
-                StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(command, file_name)
+                StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(command, file_name, randpic_oss_no_upload_list)
                 await OSSUploaderV2().upload_file(str(randpic_path/ 'public' / command / 'index.html'), f'{command}/index.html') # 修改index.html文件
                 await OSSUploaderV2().upload_file(str(randpic_path / 'public' / 'index.html'), 'index.html')
                 await OSSUploaderV2().upload_file(file_path, f'{command}/{file_name}') # 上传新增的图片到OSS
@@ -226,7 +226,7 @@ async def handle_oss(event: GroupMessageEvent) -> None:
     await oss.send('正在上传至OSS...')
     start_time = time.time()
 
-    StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site()
+    StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site(randpic_oss_no_upload_list)
     await OSSUploaderV2().upload_folder(str(randpic_path / 'public'))
 
     end_time = time.time()

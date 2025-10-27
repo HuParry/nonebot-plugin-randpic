@@ -1,6 +1,6 @@
 import zipfile
 from pathlib import Path
-
+from nonebot.log import logger
 from PIL import Image
 import io
 
@@ -13,7 +13,7 @@ def adaptive_compress_bytes(image_bytes, max_size_mb=1, target_quality=85):
     if original_size_mb <= max_size_mb:
         return image_bytes
 
-    print(f"图片大小: {original_size_mb:.2f}MB，超过限制 {max_size_mb}MB，开始自适应压缩...")
+    logger.info(f"图片大小: {original_size_mb:.2f}MB，超过限制 {max_size_mb}MB，开始自适应压缩...")
 
     # 打开图片
     image_stream = io.BytesIO(image_bytes)

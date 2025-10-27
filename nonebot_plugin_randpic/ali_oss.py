@@ -57,7 +57,7 @@ class OSSUploaderV2:
         # self.failed_count = 0
         # self.lock = threading.Lock()
 
-    async def upload_file(self, local_file_path: str, oss_key: str) -> bool | None:
+    async def upload_file(self, local_file_path: str, oss_key: str) -> bool:
         """
         上传单个文件到OSS
 

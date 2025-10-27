@@ -2,10 +2,9 @@ import time
 import uuid
 from httpx import AsyncClient
 import ssl
-from nonebot.adapters.onebot.v11 import MessageSegment, Message, Event, GroupMessageEvent
+from nonebot.adapters.onebot.v11 import MessageSegment, Message, GroupMessageEvent
 from nonebot.adapters.onebot.v11 import GROUP, GROUP_ADMIN, GROUP_OWNER
 from nonebot.plugin import on_fullmatch
-import os
 from nonebot.plugin import PluginMetadata
 from nonebot.params import Arg
 from nonebot import get_driver
@@ -49,29 +48,26 @@ driver = get_driver()
 @driver.on_startup
 async def _():
     logger.info("正在检查文件...")
-    await create_file()
+    await connect()
+    await create_dir()
     logger.info("文件检查完成，欢迎使用！")
 
-
-# @driver.on_shutdown
-# async def close_connection():
-#     logger.info("正在关闭数据库")
-#     await connection.close()
-
+# 连接数据库
+async def connect():
+    # 创建数据库
+    global connection
+    if not randpic_database_path.exists():
+        randpic_database_path.mkdir(parents=True, exist_ok=True)
+    connection = await aiosqlite.connect(randpic_database_path / "data.db")
 
 # 创建所需文件夹和数据库
-async def create_file():
+async def create_dir():
     # 先创建文件夹
     for path in randpic_command_path_tuple:
         if not path.exists():
             logger.warning('未找到{path}文件夹，准备创建{path}文件夹...'.format(path=path))
             path.mkdir(parents=True, exist_ok=True)
-    # 创建数据库，没有数据表创建数据表
 
-    global connection
-    if not randpic_database_path.exists():
-        randpic_database_path.mkdir(parents=True, exist_ok=True)
-    connection = await aiosqlite.connect(randpic_database_path / "data.db")
     cursor = await connection.cursor()
 
     # 创建表
@@ -128,6 +124,28 @@ async def create_file():
                 'INSERT or REPLACE INTO Pic_of_{command}(md5, img_url) VALUES (?, ?)'.format(command=command),
                 (fmd5, str(Path() / command / filename)))
             await connection.commit()
+
+def web_app_init():
+    driver = get_driver()
+    try:
+        from .drivers.fastapi import register_route
+    except ImportError as e:
+        logger.warning(f"Driver {driver.type} not supported")
+        return
+    
+    StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site(randpic_oss_no_upload_list)
+    if not os.path.exists(randpic_path / 'public'):
+        return
+
+    register_route(driver, randpic_path / 'public')
+    host = str(driver.config.host)
+    port = driver.config.port
+    if host in {"0.0.0.0", "127.0.0.1"}:
+        host = "localhost"
+    logger.opt(colors=True).info(
+        f"Nonebot docs will be running at: <b><u>http://{host}:{port}/randpic/</u></b>"
+    )
+web_app_init()
 
 
 picture = on_fullmatch(randpic_command_tuple, permission=GROUP, priority=1, block=True)

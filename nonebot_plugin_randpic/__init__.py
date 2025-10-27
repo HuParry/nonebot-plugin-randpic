@@ -249,4 +249,4 @@ async def handle_oss(event: GroupMessageEvent) -> None:
 
     end_time = time.time()
     elapsed_time = end_time - start_time
-    await oss.finish(f'上传完成，用时: {elapsed_time:.2f}秒')
+    await oss.finish(f'上传完成，用时: {elapsed_time:.2f}秒，地址：{endpoint}/')

@@ -7,7 +7,7 @@ from nonebot.adapters.onebot.v11 import GROUP, GROUP_ADMIN, GROUP_OWNER
 from nonebot.plugin import on_fullmatch
 from nonebot.plugin import PluginMetadata
 from nonebot.params import Arg
-from nonebot import get_driver
+from nonebot import get_driver, Driver
 from nonebot.log import logger
 import hashlib
 import aiosqlite
@@ -51,6 +51,7 @@ async def _():
     logger.info("正在检查文件...")
     await connect()
     await create_dir()
+    await web_app_init()
     logger.info("文件检查完成，欢迎使用！")
 
 # 连接数据库
@@ -126,27 +127,26 @@ async def create_dir():
                 (fmd5, str(Path() / command / filename)))
             await connection.commit()
 
-def web_app_init():
-    driver = get_driver()
+def web_app_init(web_driver: Driver):
     try:
         from .drivers.fastapi import register_route
     except ImportError as e:
-        logger.warning(f"Driver {driver.type} not supported")
+        logger.warning(f"Driver {web_driver.type} not supported")
         return
     
     StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site(randpic_oss_no_upload_list)
     if not os.path.exists(randpic_path / 'public'):
         return
 
-    register_route(driver, randpic_path / 'public')
-    host = str(driver.config.host)
-    port = driver.config.port
+    register_route(web_driver, randpic_path / 'public')
+    host = str(web_driver.config.host)
+    port = web_driver.config.port
     if host in {"0.0.0.0", "127.0.0.1"}:
         host = "localhost"
     logger.opt(colors=True).info(
         f"Nonebot docs will be running at: <b><u>http://{host}:{port}/randpic/</u></b>"
     )
-web_app_init()
+web_app_init(driver)
 
 
 picture = on_fullmatch(randpic_command_tuple, permission=GROUP, priority=1, block=True)

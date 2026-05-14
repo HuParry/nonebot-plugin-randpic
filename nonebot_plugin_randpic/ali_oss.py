@@ -68,7 +68,7 @@ class OSSUploaderV2:
         返回:
         bool: 上传是否成功
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         result = await asyncio.wait_for(
             loop.run_in_executor(
@@ -102,7 +102,7 @@ class OSSUploaderV2:
         include_hidden: 是否包含隐藏文件
         overwrite: 是否覆盖已存在的文件
         """
-        loop = asyncio.get_event_loop()
+        # loop = asyncio.get_running_loop()
         local_folder_path = Path(local_folder_path)
         if not local_folder_path.exists():
             print(f"错误: 本地文件夹不存在 - {local_folder_path}")

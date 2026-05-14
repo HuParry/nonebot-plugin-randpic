@@ -13,6 +13,7 @@ import hashlib
 import aiosqlite
 from nonebot.params import Fullmatch
 from urllib import parse
+from urllib.parse import urlparse
 
 from .config import *
 from .ali_oss import *
@@ -211,7 +212,8 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
         if status is not None:
             await add.send(pic_name + Message('\n这张已经有了，不能重复添加！'))
         else:
-            without_extension, extension = os.path.splitext(pic_url)
+            parsed = urlparse(pic_url)
+            without_extension, extension = os.path.splitext(parsed.path)
             randpic_cur_picnum = len(os.listdir(randpic_img_path / command))
             file_name = (randpic_filename.format(command=command, index=str(randpic_cur_picnum + 1).zfill(10))
                          + (extension if extension != '' else '.jpg'))

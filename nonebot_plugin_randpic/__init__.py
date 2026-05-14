@@ -202,6 +202,7 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
             continue
 
         data = resp.content
+        data = compress_image_from_bytes(data)  # 若图片超规格，压缩图片
         fmd5 = hashlib.md5(data).hexdigest()
 
         await cursor.execute(f'SELECT img_url FROM Pic_of_{command} where md5=?', (fmd5,))
@@ -217,7 +218,6 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
             file_path = randpic_img_path / command / file_name
 
             try:
-                data = compress_image_from_bytes(data)   # 若图片超规格，压缩图片
                 with file_path.open("wb") as f:
                     f.write(data)
                 await cursor.execute('insert into Pic_of_{command}(md5, img_url) values (?, ?)'.format(command=command),

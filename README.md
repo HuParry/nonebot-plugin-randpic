@@ -56,7 +56,7 @@ _✨ 一个发送指令就能让你的 bot 发出对应指令的图片的插件 
 #### fastapi生成静态网页
 Bot启动后，会尝试构建静态网页，如果drivers中没有配置fastapi，将无法生效。
 
-启动完成后，访问 http://<hots>:<port>/randpic 即可查看到内容。
+启动完成后，访问 http://\<hots\>:\<port\>/randpic 即可查看到内容。
 
 #### 阿里云OSS对象存储
 

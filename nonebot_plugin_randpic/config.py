@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Extra
-from typing import List
+from typing import List, Optional
 from nonebot import require
 from nonebot import get_driver
 
@@ -12,11 +12,11 @@ class Config(BaseModel, extra='ignore'):
     randpic_command_list: List[str] = ["capoo"]  # 指令列表
     randpic_store_dir_path: str = get_data_dir("nonebot_plugin_randpic")  # 用户自定义图片存储文件夹
     randpic_banner_group: List[int] = []  # 禁用群组列表
-    randpic_endpoint: str = None               # 建议填写自定义域名，尾部不用加/
-    randpic_bucket: str = None            # 存储空间名称
-    randpic_region: str = None                 # Bucket所在地域
-    randpic_oss_access_key_id: str = None      # 阿里云用户AccessKey ID
-    randpic_oss_access_key_secret: str = None  # 阿里云用户AccessKey Secret
+    randpic_endpoint: Optional[str] = None               # 建议填写自定义域名，尾部不用加/
+    randpic_bucket: Optional[str] = None            # 存储空间名称
+    randpic_region: Optional[str] = None               # Bucket所在地域
+    randpic_oss_access_key_id: Optional[str] = None      # 阿里云用户AccessKey ID
+    randpic_oss_access_key_secret: Optional[str] = None  # 阿里云用户AccessKey Secret
     randpic_oss_no_upload_list: List[str] = [] # 不上传oss的指令数组
 
 

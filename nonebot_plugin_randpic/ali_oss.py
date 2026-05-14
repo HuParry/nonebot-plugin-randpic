@@ -84,7 +84,7 @@ class OSSUploaderV2:
 
         # 检查上传是否成功
         if result.status_code != 200:
-            logger.waring(f"✗ 上传失败: {local_file_path} (状态码: {result.status_code})")
+            logger.warning(f"✗ 上传失败: {local_file_path} (状态码: {result.status_code})")
 
     async def upload_folder(
             self,
@@ -133,22 +133,8 @@ class OSSUploaderV2:
                 files_to_upload.append((str(local_file_path), oss_key))
         print(f"找到 {len(files_to_upload)} 个文件需要上传")
         # 并发上传文件
-        max_workers = min(32, ((os.cpu_count() or 1) + 1) // 2)
-        for local_file, oss_key in files_to_upload:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(
-                    ThreadPoolExecutor(max_workers=max_workers),
-                    lambda bucket=self.bucket_name, key=oss_key, data=open(local_file, 'rb'):
-                    self.client.put_object(oss.PutObjectRequest(
-                        bucket=bucket,
-                        key=key,
-                        body=data
-                    )),
-                ),
-                timeout=10.0
-            )
-            if result.status_code != 200:
-                logger.warning(f"✗ 上传失败: {local_file} (状态码: {result.status_code})")
+        tasks = [self.upload_file(local_file, oss_key) for local_file, oss_key in files_to_upload]
+        await asyncio.gather(*tasks)
 
     def check_file_exists(self, oss_key: str) -> bool:
         """

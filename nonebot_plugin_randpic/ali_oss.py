@@ -57,7 +57,7 @@ class OSSUploaderV2:
         # self.failed_count = 0
         # self.lock = threading.Lock()
 
-    async def upload_file(self, local_file_path: str, oss_key: str) -> bool:
+    async def upload_file(self, local_file_path: str, oss_key: str):
         """
         上传单个文件到OSS
 
@@ -148,7 +148,7 @@ class OSSUploaderV2:
                 timeout=10.0
             )
             if result.status_code != 200:
-                logger.waring(f"✗ 上传失败: {local_file} (状态码: {result.status_code})")
+                logger.warning(f"✗ 上传失败: {local_file} (状态码: {result.status_code})")
 
     def check_file_exists(self, oss_key: str) -> bool:
         """

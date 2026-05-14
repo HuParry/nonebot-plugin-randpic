@@ -222,6 +222,7 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
                     f.write(data)
                 await cursor.execute('insert into Pic_of_{command}(md5, img_url) values (?, ?)'.format(command=command),
                                      (fmd5, str(Path() / command / file_name)))
+                await connection.commit()
             except Exception as e:
                 logger.warning(e)
                 await add.finish(pic_name + Message("\n导入失败！"), at_sender=True)

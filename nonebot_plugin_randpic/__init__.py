@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 from .config import *
 from .ali_oss import *
-from .compress import compress_image_from_bytes
+from .compress import compress_image_from_bytes, get_image_extension
 from .web import StaticImageGalleryGenerator
 
 __plugin_meta__ = PluginMetadata(
@@ -51,7 +51,6 @@ async def _():
     logger.info("正在检查文件...")
     await connect()
     await create_dir()
-    await web_app_init()
     logger.info("文件检查完成，欢迎使用！")
 
 # 连接数据库
@@ -98,7 +97,11 @@ async def create_dir():
             filename = randpic_file_list[i]
             filename_without_extension, filename_extension = os.path.splitext(filename)
             format_str = randpic_filename.format( command=randpic_command_tuple[index], index=str(i + 1).zfill(10) )
-            hash_new_filename =  f"{format_str}_{hash_str}{(filename_extension if filename_extension else '.jpg')}"
+            if not filename_extension:
+                with (path / filename).open('rb') as f:
+                    data = f.read()
+                    filename_extension = get_image_extension(data)
+            hash_new_filename =  f"{format_str}_{hash_str}{filename_extension}"
             os.rename(path / filename, path / hash_new_filename)
 
         # 将哈希化的文件名订正为规范名
@@ -212,11 +215,9 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
         if status is not None:
             await add.send(pic_name + Message('\n这张已经有了，不能重复添加！'))
         else:
-            parsed = urlparse(pic_url)
-            without_extension, extension = os.path.splitext(parsed.path)
             randpic_cur_picnum = len(os.listdir(randpic_img_path / command))
             file_name = (randpic_filename.format(command=command, index=str(randpic_cur_picnum + 1).zfill(10))
-                         + (extension if extension != '' else '.jpg'))
+                        + get_image_extension(data))
             file_path = randpic_img_path / command / file_name
 
             try:

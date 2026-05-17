@@ -14,6 +14,7 @@ import aiosqlite
 from nonebot.params import Fullmatch
 from urllib import parse
 from urllib.parse import urlparse
+import importlib
 
 from .config import *
 from .ali_oss import *
@@ -132,15 +133,17 @@ async def create_dir():
 
 def web_app_init(web_driver: Driver):
     try:
-        from .drivers.fastapi import register_route
-    except ImportError as e:
-        logger.warning(f"Driver {web_driver.type} not supported")
+        _module = importlib.import_module(
+            f"nonebot_plugin_randpic.drivers.{driver.type.split('+')[0]}"
+        )
+    except ImportError:
+        logger.warning(f"Driver {driver.type} not supported")
         return
     
     StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site(randpic_oss_no_upload_list)
     if not os.path.exists(randpic_path / 'public'):
         return
-
+    register_route = getattr(_module, "register_route")
     register_route(web_driver, randpic_path / 'public')
     host = str(web_driver.config.host)
     port = web_driver.config.port

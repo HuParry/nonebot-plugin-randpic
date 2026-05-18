@@ -15,10 +15,10 @@ from nonebot.params import Fullmatch
 from urllib import parse
 from urllib.parse import urlparse
 import importlib
-
+import imagehash
 from .config import *
 from .ali_oss import *
-from .compress import compress_image_from_bytes, get_image_extension
+from .compress import compress_image_from_bytes, get_image_extension, compute_phash
 from .web import StaticImageGalleryGenerator
 
 __plugin_meta__ = PluginMetadata(
@@ -77,8 +77,9 @@ async def create_dir():
         await cursor.execute('DROP table if exists Pic_of_{command};'.format(command=command))
         await cursor.execute('''
             CREATE TABLE IF NOT EXISTS Pic_of_{command} (
-                md5 TEXT PRIMARY KEY,
-                img_url TEXT
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                img_url TEXT NOT NULL,
+                phash TEXT NOT NULL
             )
             '''.format(command=command))
         await connection.commit()
@@ -123,12 +124,12 @@ async def create_dir():
             with (path / filename).open('wb') as f:
                 f.write(data)
 
-            fmd5 = hashlib.md5(data).hexdigest()
+            new_phash_str = compute_phash(data)
             cursor = await connection.cursor()
             command: str = randpic_command_tuple[index]
             await cursor.execute(
-                'INSERT or REPLACE INTO Pic_of_{command}(md5, img_url) VALUES (?, ?)'.format(command=command),
-                (fmd5, str(Path() / command / filename)))
+                'INSERT INTO Pic_of_{command}(img_url, phash) VALUES (?, ?)'.format(command=command),
+                (str(Path() / command / filename), new_phash_str))
             await connection.commit()
 
 def web_app_init(web_driver: Driver):
@@ -155,7 +156,7 @@ def web_app_init(web_driver: Driver):
 web_app_init(driver)
 
 
-picture = on_fullmatch(randpic_command_tuple, permission=GROUP, priority=1, block=True)
+picture = on_fullmatch(randpic_command_tuple, permission=GROUP, priority=2, block=True)
 
 
 @picture.handle()
@@ -178,7 +179,7 @@ async def pic(event: GroupMessageEvent):
         await picture.send(f'{command}出不来了，稍后再试试吧~')
 
 
-add = on_fullmatch(randpic_command_add_tuple, permission=GROUP_ADMIN | GROUP_OWNER, priority=1, block=True)
+add = on_fullmatch(randpic_command_add_tuple, permission=GROUP_ADMIN | GROUP_OWNER, priority=2, block=True)
 
 
 @add.got("pic", prompt="请发送图片！")
@@ -210,45 +211,48 @@ async def add_pic(args: str = Fullmatch(), pic_list: Message = Arg('pic')):
 
         data = resp.content
         data = compress_image_from_bytes(data)  # 若图片超规格，压缩图片
-        fmd5 = hashlib.md5(data).hexdigest()
+        new_phash_str = compute_phash(data)
+        new_phash = imagehash.hex_to_hash(new_phash_str)
 
-        await cursor.execute(f'SELECT img_url FROM Pic_of_{command} where md5=?', (fmd5,))
-        status = await cursor.fetchone()
+        await cursor.execute(f'SELECT phash FROM Pic_of_{command}')
+        existing = await cursor.fetchall()
+        SIMILARITY_THRESHOLD = 5  # 汉明距离 ≤5 认为相似
+        for ex_phash_str, in existing:
+            ex_phash = imagehash.hex_to_hash(ex_phash_str)
+            if (new_phash - ex_phash) < SIMILARITY_THRESHOLD:
+                await add.finish(pic_name + Message('\n这张已经有相似图，不能重复添加！'))
 
-        if status is not None:
-            await add.send(pic_name + Message('\n这张已经有了，不能重复添加！'))
-        else:
-            randpic_cur_picnum = len(os.listdir(randpic_img_path / command))
-            file_name = (randpic_filename.format(command=command, index=str(randpic_cur_picnum + 1).zfill(10))
-                        + get_image_extension(data))
-            file_path = randpic_img_path / command / file_name
+        randpic_cur_picnum = len(os.listdir(randpic_img_path / command))
+        file_name = (randpic_filename.format(command=command, index=str(randpic_cur_picnum + 1).zfill(10))
+                    + get_image_extension(data))
+        file_path = randpic_img_path / command / file_name
 
-            try:
-                with file_path.open("wb") as f:
-                    f.write(data)
-                await cursor.execute('insert into Pic_of_{command}(md5, img_url) values (?, ?)'.format(command=command),
-                                     (fmd5, str(Path() / command / file_name)))
-                await connection.commit()
-            except Exception as e:
-                logger.warning(e)
-                await add.finish(pic_name + Message("\n导入失败！"), at_sender=True)
+        try:
+            with file_path.open("wb") as f:
+                f.write(data)
+            await cursor.execute('insert into Pic_of_{command}(img_url, phash) values (?, ?)'.format(command=command),
+                                 (str(Path() / command / file_name), new_phash_str))
+            await connection.commit()
+        except Exception as e:
+            logger.warning(e)
+            await add.finish(pic_name + Message("\n导入失败！"), at_sender=True)
 
-            msg = "\n导入成功！"
-            if isOss and command not in randpic_oss_no_upload_list:
-                msg += f'可去 {endpoint}/{parse.quote(command)}/ 查看'
-                # StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site()
-                StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(command, file_name, randpic_oss_no_upload_list)
-                await OSSUploaderV2().upload_file(str(randpic_path/ 'public' / command / 'index.html'), f'{command}/index.html') # 修改index.html文件
-                await OSSUploaderV2().upload_file(str(randpic_path / 'public' / 'index.html'), 'index.html')
-                await OSSUploaderV2().upload_file(file_path, f'{command}/{file_name}') # 上传新增的图片到OSS
-            await add.finish(pic_name + Message(msg), at_sender=True)
+        msg = "\n导入成功！"
+        if isOss and command not in randpic_oss_no_upload_list:
+            msg += f'可去 {endpoint}/{parse.quote(command)}/ 查看'
+            # StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site()
+            StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(command, file_name, randpic_oss_no_upload_list)
+            await OSSUploaderV2().upload_file(str(randpic_path/ 'public' / command / 'index.html'), f'{command}/index.html') # 修改index.html文件
+            await OSSUploaderV2().upload_file(str(randpic_path / 'public' / 'index.html'), 'index.html')
+            await OSSUploaderV2().upload_file(file_path, f'{command}/{file_name}') # 上传新增的图片到OSS
+        await add.finish(pic_name + Message(msg), at_sender=True)
 
-oss = on_fullmatch('上传oss', ignorecase=True, permission=GROUP_ADMIN | GROUP_OWNER, priority=1, block=True, )
-@oss.handle()
+OSS = on_fullmatch('上传oss', ignorecase=True, permission=GROUP_ADMIN | GROUP_OWNER, priority=1, block=True, )
+@OSS.handle()
 async def handle_oss(event: GroupMessageEvent) -> None:
     if not isOss:
         return
-    await oss.send('正在上传至OSS...')
+    await OSS.send('正在上传至OSS...')
     start_time = time.time()
 
     StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site(randpic_oss_no_upload_list)
@@ -256,4 +260,4 @@ async def handle_oss(event: GroupMessageEvent) -> None:
 
     end_time = time.time()
     elapsed_time = end_time - start_time
-    await oss.finish(f'上传完成，用时: {elapsed_time:.2f}秒，地址：{endpoint}/')
+    await OSS.finish(f'上传完成，用时: {elapsed_time:.2f}秒，地址：{endpoint}/')

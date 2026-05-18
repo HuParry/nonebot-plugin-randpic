@@ -2,6 +2,7 @@ import zipfile
 from pathlib import Path
 from nonebot.log import logger
 from PIL import Image
+import imagehash
 import io
 
 
@@ -198,6 +199,11 @@ def compress_folder_basic(folder_path, zip_path, include_subfolders=True):
         print(f"压缩失败: {e}")
         return False
 
+
+def compute_phash(image_bytes: bytes):
+    """计算图片感知哈希，返回十六进制字符串"""
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        return str(imagehash.phash(img))
 
 # 测试
 if __name__ == '__main__':

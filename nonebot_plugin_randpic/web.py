@@ -1,5 +1,61 @@
 import os
+from html import escape
 from pathlib import Path
+from urllib.parse import quote
+
+footer_content = '<a href="http://beian.miit.gov.cn/" target="_blank" rel="nofollow noopener">湘ICP备2025127872号-1</a>'
+FOOTER = '</main><footer>{footer}</footer></div></body></html>'.format(footer=footer_content)
+
+GALLERY_STYLE = '''
+    :root { color-scheme: light; --ink: #18201d; --muted: #758079; --paper: #f5f6f2; --card: #fff; --line: #e7eae4; --accent: #286b55; --accent-soft: #e7f1eb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--paper); font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    a { color: inherit; }
+    .shell { width: min(1160px, calc(100% - 48px)); margin: 0 auto; }
+    .topbar { height: 72px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+    .brand { display: inline-flex; align-items: center; gap: 11px; text-decoration: none; font-weight: 750; letter-spacing: -.03em; }
+    .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 11px; color: white; background: var(--accent); font-size: 17px; }
+    .top-note { color: var(--muted); font-size: 13px; }
+    .hero { padding: 58px 0 34px; }
+    .eyebrow { margin: 0 0 12px; color: var(--accent); font-size: 12px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(32px, 5vw, 52px); line-height: 1.08; letter-spacing: -.055em; }
+    .hero-copy { max-width: 620px; margin: 15px 0 0; color: var(--muted); font-size: 16px; line-height: 1.75; }
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin: 26px 0 17px; }
+    .section-head h2 { margin: 0; font-size: 19px; letter-spacing: -.025em; }
+    .count { color: var(--muted); font-size: 13px; }
+    .folder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 17px; padding-bottom: 60px; }
+    .folder-card { overflow: hidden; border: 1px solid var(--line); border-radius: 17px; background: var(--card); text-decoration: none; transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease; }
+    .folder-card:hover { transform: translateY(-4px); border-color: #c9d9ce; box-shadow: 0 14px 34px #24392b12; }
+    .folder-cover { position: relative; height: 172px; overflow: hidden; background: linear-gradient(135deg, #dce9df, #f0eadd); }
+    .folder-cover img { width: 100%; height: 100%; object-fit: cover; transition: transform .35s ease; }
+    .folder-card:hover .folder-cover img { transform: scale(1.045); }
+    .cover-placeholder { height: 100%; display: grid; place-items: center; color: #668474; font-size: 46px; }
+    .folder-body { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 18px; }
+    .folder-name { overflow: hidden; font-size: 15px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+    .folder-meta { margin-top: 5px; color: var(--muted); font-size: 12px; }
+    .arrow { flex: none; width: 31px; height: 31px; display: grid; place-items: center; border-radius: 50%; color: var(--accent); background: var(--accent-soft); }
+    .crumbs { display: flex; align-items: center; gap: 9px; margin-top: 27px; color: var(--muted); font-size: 13px; }
+    .crumbs a { color: var(--accent); text-decoration: none; }
+    .crumbs a:hover { text-decoration: underline; }
+    .gallery-title { padding: 24px 0 22px; }
+    .gallery-title h1 { font-size: clamp(30px, 4vw, 42px); }
+    .subfolders { display: flex; flex-wrap: wrap; gap: 9px; margin: 0 0 22px; }
+    .subfolder { padding: 9px 13px; border: 1px solid #dce5dc; border-radius: 999px; color: var(--accent); background: #fff; font-size: 13px; text-decoration: none; transition: background .2s ease; }
+    .subfolder:hover { background: var(--accent-soft); }
+    .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 17px; padding-bottom: 60px; }
+    .image-card { overflow: hidden; border: 1px solid var(--line); border-radius: 15px; background: var(--card); transition: transform .2s ease, box-shadow .2s ease; }
+    .image-card:hover { transform: translateY(-3px); box-shadow: 0 12px 28px #24392b12; }
+    .image-link { position: relative; display: block; height: 205px; overflow: hidden; background: #e9ece7; }
+    .image-preview { width: 100%; height: 100%; display: block; object-fit: cover; transition: transform .35s ease; }
+    .image-card:hover .image-preview { transform: scale(1.04); }
+    .image-info { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; }
+    .image-name { min-width: 0; overflow: hidden; color: #48534c; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+    .open-link { flex: none; color: var(--accent); font-size: 12px; font-weight: 700; text-decoration: none; }
+    .empty { grid-column: 1 / -1; padding: 50px 20px; border: 1px dashed #cbd4ca; border-radius: 16px; color: var(--muted); text-align: center; }
+    footer { padding: 22px 0 30px; border-top: 1px solid var(--line); color: #929b94; font-size: 12px; text-align: center; }
+    @media (max-width: 600px) { .shell { width: min(100% - 30px, 1160px); } .topbar { height: 62px; } .top-note { font-size: 11px; } .hero { padding: 42px 0 24px; } .folder-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; } .folder-cover { height: 125px; } .folder-body { padding: 12px; } .folder-name { font-size: 13px; } .arrow { width: 27px; height: 27px; } .image-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .image-link { height: 145px; } .image-info { padding: 10px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }
+'''
 
 
 class StaticImageGalleryGenerator:
@@ -43,307 +99,59 @@ class StaticImageGalleryGenerator:
 
     def generate_index_html(self, all_folders):
         """生成主页HTML"""
-        html = '''<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>图片库 - randpic</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        .folder-container {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-            gap: 20px;
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        .folder-card {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            overflow: hidden;
-            transition: transform 0.3s;
-            text-align: center;
-            padding: 20px;
-        }
-        .folder-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
-        }
-        .folder-icon {
-            font-size: 48px;
-            margin-bottom: 15px;
-            color: #007bff;
-        }
-        .folder-name {
-            font-weight: bold;
-            margin-bottom: 10px;
-            word-break: break-all;
-        }
-        .folder-stats {
-            color: #666;
-            font-size: 14px;
-            margin-bottom: 15px;
-        }
-        .folder-link {
-            display: inline-block;
-            padding: 8px 16px;
-            background: #007bff;
-            color: white;
-            text-decoration: none;
-            border-radius: 5px;
-            transition: background 0.3s;
-        }
-        .folder-link:hover {
-            background: #0056b3;
-        }
-        .stats {
-            text-align: center;
-            margin-bottom: 20px;
-            color: #666;
-        }
-        .breadcrumb {
-            text-align: center;
-            margin-bottom: 20px;
-            color: #666;
-        }
-        .breadcrumb a {
-            color: #007bff;
-            text-decoration: none;
-        }
-        .breadcrumb a:hover {
-            text-decoration: underline;
-        }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <div class="breadcrumb">
-            <a href="./">首页</a>
-        </div>
-        <h1>图片库 - randpic</h1>
-        <div class="stats">
-            共 ''' + str(len(all_folders)) + ''' 个文件夹
-        </div>
-    </div>
+        total_images = sum(folder['image_count'] for folder in all_folders.values())
+        parts = [f'''<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f5f6f2"><title>图片收藏馆 · Randpic</title>
+<style>{GALLERY_STYLE}</style></head><body><div class="shell">
+<nav class="topbar"><a class="brand" href="./"><span class="brand-mark">✳</span><span>RANDPIC <span style="color:#8b958e;font-weight:500">/ 图片收藏馆</span></span></a><span class="top-note">捕捉喜欢的瞬间</span></nav>
+<header class="hero"><p class="eyebrow">YOUR IMAGE LIBRARY</p><h1>每一张，都值得<br>被好好收藏。</h1><p class="hero-copy">在这里慢慢翻看收藏的每一份灵感。</p></header>
+<div class="section-head"><h2>全部分类</h2><span class="count">{len(all_folders)} 个分类　·　{total_images} 张图片</span></div>
+<main class="folder-grid">''']
 
-    <div class="folder-container">
-'''
-
+        if not all_folders:
+            parts.append('<div class="empty">图片库还是空的，添加图片后就会显示在这里。</div>')
         for folder_key, folder_info in all_folders.items():
-            if folder_key == '':
-                display_name = '根目录'
-                folder_url = './'
-            else:
-                display_name = folder_key
-                folder_url = f'./{folder_key}/'
-
-            html += f'''
-        <div class="folder-card">
-            <div class="folder-icon">📁</div>
-            <div class="folder-name">{display_name}</div>
-            <div class="folder-stats">{folder_info['image_count']} 张图片</div>
-            <a href="{folder_url}" class="folder-link">查看图片</a>
-        </div>
-'''
-
-        html += '''
-    </div>
-</body>
-</html>'''
-
-        return html
+            display_name = folder_key or '根目录'
+            folder_url = './' if not folder_key else f'./{quote(folder_key, safe="/")}/'
+            images = folder_info['images']
+            cover_url = f'{folder_url}{quote(images[0], safe="")}' if images else ''
+            cover = (f'<img src="{escape(cover_url, quote=True)}" alt="" loading="lazy">'
+                     if cover_url else '<div class="cover-placeholder">✳</div>')
+            parts.append(f'''<a class="folder-card" href="{escape(folder_url, quote=True)}">
+<div class="folder-cover">{cover}</div><div class="folder-body"><div><div class="folder-name">{escape(display_name)}</div>
+<div class="folder-meta">{folder_info['image_count']} 张图片</div></div><span class="arrow">↗</span></div></a>''')
+        parts.append(FOOTER)
+        return ''.join(parts)
 
     def generate_folder_html(self, folder_info, folder_path):
         """生成文件夹页面HTML"""
-        html = f'''<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>图片库 - {folder_path if folder_path else '根目录'}</title>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }}
-        .header {{
-            text-align: center;
-            margin-bottom: 30px;
-        }}
-        .breadcrumb {{
-            text-align: center;
-            margin-bottom: 20px;
-            color: #666;
-        }}
-        .breadcrumb a {{
-            color: #007bff;
-            text-decoration: none;
-        }}
-        .breadcrumb a:hover {{
-            text-decoration: underline;
-        }}
-        .image-container {{
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 20px;
-            max-width: 1200px;
-            margin: 0 auto;
-        }}
-        .image-card {{
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            overflow: hidden;
-            transition: transform 0.3s;
-            text-align: center;
-        }}
-        .image-card:hover {{
-            transform: scale(1.05);
-            z-index: 10;
-        }}
-        .image-preview {{
-            width: 100%;
-            height: 150px;
-            object-fit: cover;
-            display: block;
-        }}
-        .image-info {{
-            padding: 10px;
-        }}
-        .image-name {{
-            font-size: 12px;
-            word-break: break-all;
-            margin-bottom: 5px;
-        }}
-        .image-link {{
-            display: inline-block;
-            padding: 5px 10px;
-            background: #28a745;
-            color: white;
-            text-decoration: none;
-            border-radius: 3px;
-            font-size: 12px;
-        }}
-        .image-link:hover {{
-            background: #218838;
-        }}
-        .back-link {{
-            display: inline-block;
-            margin-bottom: 20px;
-            padding: 10px 20px;
-            background: #6c757d;
-            color: white;
-            text-decoration: none;
-            border-radius: 5px;
-        }}
-        .back-link:hover {{
-            background: #5a6268;
-        }}
-        .stats {{
-            text-align: center;
-            margin-bottom: 20px;
-            color: #666;
-        }}
-        .subfolder-list {{
-            margin: 20px 0;
-            text-align: center;
-        }}
-        .subfolder-item {{
-            display: inline-block;
-            margin: 5px 10px;
-            padding: 5px 15px;
-            background: #17a2b8;
-            color: white;
-            text-decoration: none;
-            border-radius: 20px;
-            font-size: 12px;
-        }}
-        .subfolder-item:hover {{
-            background: #138496;
-        }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <div class="breadcrumb">
-            <a href="../">首页</a>
-            {' / ' + folder_path if folder_path else ''}
-        </div>
-        <a href="../" class="back-link">← 返回文件夹列表</a>
-        <h1>{folder_path if folder_path else '根目录'}</h1>
-        <div class="stats">
-            共 {folder_info['image_count']} 张图片
-        </div>
-'''
-
+        title = folder_path or '根目录'
+        parts = [f'''<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f5f6f2"><title>{escape(title)} · Randpic</title>
+<style>{GALLERY_STYLE}</style></head><body><div class="shell">
+<nav class="topbar"><a class="brand" href="../"><span class="brand-mark">✳</span><span>RANDPIC <span style="color:#8b958e;font-weight:500">/ 图片收藏馆</span></span></a><span class="top-note">{folder_info['image_count']} 张收藏</span></nav>
+<div class="crumbs"><a href="../">全部分类</a><span>／</span><span>{escape(title)}</span></div>
+<header class="gallery-title"><p class="eyebrow">COLLECTION</p><h1>{escape(title)}</h1><p class="hero-copy">本分类共收藏 {folder_info['image_count']} 张图片。</p></header>''']
         if folder_info['subfolders']:
-            html += '''
-        <div class="subfolder-list">
-            <strong>子文件夹:</strong>
-'''
+            parts.append('<nav class="subfolders" aria-label="子文件夹">')
             for subfolder in folder_info['subfolders']:
-                if folder_path:
-                    subfolder_path = f'{folder_path}/{subfolder}'
-                    subfolder_url = f'./{subfolder}/index.html'
-                else:
-                    subfolder_path = subfolder
-                    subfolder_url = f'./{subfolder}/index.html'
-
-                html += f'            <a href="{subfolder_url}" class="subfolder-item">{subfolder}</a>\n'
-
-            html += '''        </div>
-'''
-
-        html += '''
-    </div>
-
-    <div class="image-container">
-'''
-
+                subfolder_url = f'./{quote(subfolder, safe="")}/index.html'
+                parts.append(f'<a class="subfolder" href="{escape(subfolder_url, quote=True)}">↗　{escape(subfolder)}</a>')
+            parts.append('</nav>')
+        parts.append('<main class="image-grid">')
+        if not folder_info['images']:
+            parts.append('<div class="empty">这个分类暂时还没有图片。</div>')
         for image in folder_info['images']:
-            if folder_path:
-                image_path = f'{folder_path}/{image}'
-            else:
-                image_path = image
-
-            html += f'''
-        <div class="image-card">
-            <img src="{image}" 
-                 alt="{image}" 
-                 class="image-preview"
-                 onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"
-                 loading="lazy">
-            <div style="display:none; padding: 20px; text-align: center; color: #666;">
-                图片无法显示
-            </div>
-            <div class="image-info">
-                <div class="image-name">{image}</div>
-                <a href="{image}" 
-                   target="_blank" 
-                   class="image-link">查看</a>
-            </div>
-        </div>
-'''
-
-        html += '''
-    </div>
-</body>
-</html>'''
-
-        return html
+            image_url = quote(image, safe="")
+            safe_url = escape(image_url, quote=True)
+            safe_name = escape(image)
+            parts.append(f'''<article class="image-card"><a class="image-link" href="{safe_url}" target="_blank" rel="noopener">
+<img class="image-preview" src="{safe_url}" alt="{safe_name}" loading="lazy"></a>
+<div class="image-info"><span class="image-name" title="{safe_name}">{safe_name}</span><a class="open-link" href="{safe_url}" target="_blank" rel="noopener">查看 ↗</a></div></article>''')
+        parts.append(FOOTER)
+        return ''.join(parts)
 
     def generate_static_site(self, no_upload_oss_list):
         """生成静态网站"""

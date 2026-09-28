@@ -4,6 +4,7 @@ from .config import *
 from nonebot.log import logger
 import asyncio
 import alibabacloud_oss_v2 as oss
+import alibabacloud_oss_v2.aio as oss_aio
 
 # 建议填写自定义域名，例如：https://oss.huparry.cn 。
 endpoint = randpic_endpoint
@@ -51,13 +52,11 @@ class OSSUploaderV2:
         # 使用配置好的信息创建OSS客户端
 
         # 创建客户端
-        self.client = oss.Client(cfg)
+        # self.client = oss.Client(cfg)
         self.bucket_name = bucket
-        # self.uploaded_count = 0
-        # self.failed_count = 0
-        # self.lock = threading.Lock()
+        self.cfg = cfg
 
-    async def upload_file(self, local_file_path: str, oss_key: str):
+    async def upload_file(self, local_file_path: str, oss_key: str) -> bool:
         """
         上传单个文件到OSS
 
@@ -68,23 +67,24 @@ class OSSUploaderV2:
         返回:
         bool: 上传是否成功
         """
-        loop = asyncio.get_running_loop()
+        client = oss_aio.AsyncClient(self.cfg)
+        try:
+            with Path(local_file_path).open('rb') as f:
+                data = f.read()
+            result = await client.put_object(
+                oss.PutObjectRequest(
+                    bucket=self.bucket_name,
+                    key=oss_key,
+                    body=data,
+                )
+            )
+            return True
 
-        result = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda bucket_name=self.bucket_name, key=oss_key:
-                self.client.put_object_from_file(oss.PutObjectRequest(
-                    bucket=bucket_name,
-                    key=key
-                ), local_file_path),
-            ),
-            timeout=10.0
-        )
-
-        # 检查上传是否成功
-        if result.status_code != 200:
-            logger.warning(f"✗ 上传失败: {local_file_path} (状态码: {result.status_code})")
+        except Exception as e:
+            logger.error(f"✗ 上传失败: {local_file_path} (错误: {str(e)})")
+            return False
+        finally:
+            await client.close()
 
     async def upload_folder(
             self,
@@ -127,16 +127,45 @@ class OSSUploaderV2:
                     oss_key = str(relative_path).replace('\\', '/')
                 if not overwrite:
                     # 如果不覆盖，检查文件是否已存在
-                    if self.check_file_exists(oss_key):
+                    if await self.check_file_exists(oss_key):
                         print(f"跳过已存在文件: {oss_key}")
                         continue
                 files_to_upload.append((str(local_file_path), oss_key))
         print(f"找到 {len(files_to_upload)} 个文件需要上传")
-        # 并发上传文件
-        tasks = [self.upload_file(local_file, oss_key) for local_file, oss_key in files_to_upload]
-        await asyncio.gather(*tasks)
+        # 分批并发上传，限制同时运行的请求数，避免大量文件时创建过多任务。
+        concurrency = 16
+        total = len(files_to_upload)
+        completed = succeeded = failed = 0
+        last_report = 0.0
 
-    def check_file_exists(self, oss_key: str) -> bool:
+        async def upload_with_progress(local_file: str, oss_key: str) -> None:
+            nonlocal completed, succeeded, failed, last_report
+            try:
+                if await self.upload_file(local_file, oss_key):
+                    succeeded += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                failed += 1
+                logger.error(f"✗ 上传失败: {local_file} (错误: {str(e)})")
+            finally:
+                completed += 1
+                now = asyncio.get_running_loop().time()
+                if now - last_report >= 1.0 or completed == total:
+                    last_report = now
+                    percentage = completed * 100 / total
+                    logger.info(
+                        f"OSS上传进度: {completed}/{total} ({percentage:.1f}%)，"
+                        f"成功 {succeeded}，失败 {failed}"
+                    )
+
+        for start in range(0, len(files_to_upload), concurrency):
+            batch = files_to_upload[start:start + concurrency]
+            await asyncio.gather(
+                *(upload_with_progress(local_file, oss_key) for local_file, oss_key in batch)
+            )
+
+    async def check_file_exists(self, oss_key: str) -> bool:
         """
         检查OSS中是否存在指定文件
 
@@ -146,12 +175,13 @@ class OSSUploaderV2:
         返回:
         bool: 文件是否存在
         """
+        client = oss_aio.AsyncClient(self.cfg)
         try:
             head_request = oss.HeadObjectRequest(
                 bucket=self.bucket_name,
                 key=oss_key
             )
-            result = self.client.head_object(head_request)
+            result = await client.head_object(head_request)
             return result.status_code == 200
         except oss.exceptions.ServiceError as e:
             if e.code == 'NoSuchKey':

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ClaudeCodeEditorTabs">
+    <option name="activeSessionId" value="c37ad4ed-e098-4d53-8d58-e1b4f5c8895f" />
+    <option name="openSessionIds">
+      <list>
+        <option value="54e742ee-ee40-4d31-adaa-9e34947944cc" />
+        <option value="c37ad4ed-e098-4d53-8d58-e1b4f5c8895f" />
+      </list>
+    </option>
+    <option name="sessionPaths">
+      <map>
+        <entry key="54e742ee-ee40-4d31-adaa-9e34947944cc" value="/sessions/new" />
+        <entry key="c37ad4ed-e098-4d53-8d58-e1b4f5c8895f" value="/sessions/2c812e09-d6a9-4053-8d29-8532591300fe" />
+      </map>
+    </option>
+    <option name="sessionTitles">
+      <map>
+        <entry key="54e742ee-ee40-4d31-adaa-9e34947944cc" value="Claude Code" />
+        <entry key="c37ad4ed-e098-4d53-8d58-e1b4f5c8895f" value="救救我，我现在的这个nonebot插件，在群里发送图片，之前能获取到图片，今天突然报错了，你有什么好" />
+      </map>
+    </option>
+  </component>
+</project>

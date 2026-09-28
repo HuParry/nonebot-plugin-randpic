@@ -286,10 +286,19 @@ async def add_pic(matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = A
             await add.send(pic_name + MessageSegment.text("\n输入格式有误，请重新触发指令！"), at_sender=True)
             continue
         pic_url = pic_name.data['url']
+        logger.info(f"正在下载图片：{pic_url}")
 
         ssl_context = ssl.create_default_context()
         ssl_context.set_ciphers("DEFAULT")
-        async with AsyncClient(verify=ssl_context) as client:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Referer": "https://gchat.qpic.cn/",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Sec-Fetch-Site": "cross-site",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Dest": "image",
+        }
+        async with AsyncClient(headers=headers, verify=ssl_context, timeout=5.0) as client:
             resp = await client.get(pic_url, timeout=5.0)
 
         try:

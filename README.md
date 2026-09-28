@@ -56,7 +56,7 @@ _✨ 一个发送指令就能让你的 bot 发出对应指令的图片的插件 
 #### fastapi生成静态网页
 Bot启动后，会尝试构建静态网页，如果drivers中没有配置fastapi，将无法生效。
 
-启动完成后，访问 http://\<hots\>:\<port\>/randpic 即可查看到内容。
+启动完成后，访问 [http://\<hots\>:\<port\>/randpic](http://<hots>:<port>/randpic) 即可查看到内容。
 
 #### 阿里云OSS对象存储
 
@@ -125,24 +125,24 @@ bucket的访问权限至少要设置为公共读，否则通过域名也无法�
 
 打开 nonebot2 项目根目录下的 `pyproject.toml` 文件, 在 `[tool.nonebot]` 部分追加写入
 
-    plugins = ["nonebot_plugin_capoo"]
+    plugins = ["nonebot_plugin_randpic"]
 
 </details>
 
 ## ⚙️ 配置
 
-在 nonebot2 项目的`.env`文件中添加下表中的必填配置，非必填配置不添加也能正常使用。
+在 nonebot2 项目的`.env`文件中添加下表中的配置，非必填配置不添加也能正常使用。
 
-|              配置项              | 必填 |                  默认值                   |                   说明                    |
-|:-----------------------------:|:--:|:--------------------------------------:|:---------------------------------------:|
-|    randpic_store_dir_path     | 否  | get_data_dir("nonebot_plugin_randpic") | 图片存储的路径，用户自定义路径，不定义路径则由localstore插件定义路径 |
-|     randpic_banner_group      | 否  |                   []                   |               不触发发图功能的群聊                |
-|       randpic_endpoint        | 否  |                  None                  |       填写自定义域名，域名尾部不用加/ （后续实现相关功能）       |
-|        randpic_bucket         | 否  |                  None                  |         阿里云OSS对象存储空间名称(bucket)          |
-|        randpic_region         | 否  |                  None                  |          阿里云OSS对象存储bucket所在地域           |
-|   randpic_oss_access_key_id   | 否  |                  None                  |            阿里云用户AccessKey ID            |
-| randpic_oss_access_key_secret | 否  |                  None                  |          阿里云用户AccessKey Secret          |
-|  randpic_oss_no_upload_list   | 否  |                   []                   |    不上传到OSS的指令文件夹列表，该列表中对应的指令均不上传至OSS    |
+|            配置项             | 必填 |                 默认值                 |                                 说明                                 |
+|:-----------------------------:|:----:|:--------------------------------------:|:--------------------------------------------------------------------:|
+|    randpic_store_dir_path     |  否  | get_data_dir("nonebot_plugin_randpic") | 图片存储的路径，用户自定义路径，不定义路径则由localstore插件定义路径 |
+|     randpic_banner_group      |  否  |                   []                   |                         不触发发图功能的群聊                         |
+|       randpic_endpoint        |  否  |                  None                  |                   填写自定义域名，域名尾部不用加/                    |
+|        randpic_bucket         |  否  |                  None                  |                  阿里云OSS对象存储空间名称(bucket)                   |
+|        randpic_region         |  否  |                  None                  |                   阿里云OSS对象存储bucket所在地域                    |
+|   randpic_oss_access_key_id   |  否  |                  None                  |                        阿里云用户AccessKey ID                        |
+| randpic_oss_access_key_secret |  否  |                  None                  |                      阿里云用户AccessKey Secret                      |
+|  randpic_oss_no_upload_list   |  否  |                   []                   |     不上传到OSS的指令文件夹列表，该列表中对应的指令均不上传至OSS     |
 
 在插件的本地存储目录下会有 `randpic_commands.json` 文件，该文件存储了对应指令以及每个指令的分群禁用配置。群里添加新指令、`@bot 禁用<指令>`、`@bot 启用<指令>` 都会修改这个文件，你也可以自己改完后重启 bot。
 
@@ -186,7 +186,7 @@ randpic_oss_no_upload_list=["capoo"]
 
 ### 效果图
 #### `capoo` 指令
-<img src="./docs/preview.jpg" width="375" />
+<img src="./docs/preview.jpg" width="375"  alt="capoo"/>
 
 #### `添加capoo` 指令
 <img src="./docs/preview2.jpg" width="375"  alt="添加capoo"/>
@@ -221,7 +221,7 @@ randpic_oss_no_upload_list=["capoo"]
 - [X] 添加图片压缩功能，避免图片文件夹空间过大
 - [X] 以阿里云OSS对象存储搭建静态网页，便于浏览器查看图片
 - [X] Bot使用期间也能在群内直接添加新指令。
-- [ ] 完善权限管理机制，采用更详细的权限管理，避免插件滥用
+- [X] 完善权限管理机制，采用更详细的权限管理，避免插件滥用
 - [ ] 添加智能识图选项（调用api），避免添加违禁图导致被风控
 
 ## 鸣谢

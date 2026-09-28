@@ -121,14 +121,20 @@ async def create_dir():
     ''')
     # 创建表
     for command in command_list:
-        if not await _is_folder_changed(command, randpic_img_path / command):
+        folder_changed = await _is_folder_changed(command, randpic_img_path / command)
+        table_name = f"Pic_of_{command}"
+        await cursor.execute(f"PRAGMA table_info({table_name})")
+        columns = {row[1] for row in await cursor.fetchall()}
+        has_send_count = "send_count" in columns
+        if not folder_changed and has_send_count:
             continue
-        await cursor.execute('DROP table if exists Pic_of_{command};'.format(command=command))
+        await cursor.execute(f'DROP TABLE IF EXISTS {table_name}')
         await cursor.execute('''
             CREATE TABLE IF NOT EXISTS Pic_of_{command} (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 img_url TEXT NOT NULL,
-                phash TEXT NOT NULL
+                phash TEXT NOT NULL,
+                send_count INTEGER NOT NULL DEFAULT 0
             )
             '''.format(command=command))
         await connection.commit()
@@ -223,17 +229,45 @@ async def pic(event: GroupMessageEvent):
     global connection
     cursor = await connection.cursor()
     command = str(event.get_message()).strip()
-    await cursor.execute(f'SELECT img_url FROM Pic_of_{command} ORDER BY RANDOM() limit 1')
+    await cursor.execute(f'''
+        WITH weighted AS (
+            SELECT
+                id,
+                img_url,
+                SUM(1.0 / (send_count + 1)) OVER (
+                    ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                ) AS cumulative_weight
+            FROM Pic_of_{command}
+        ),
+        ticket AS (
+            SELECT
+                abs(random()) / 9223372036854775808.0
+                * MAX(cumulative_weight) AS value
+            FROM weighted
+        )
+        SELECT weighted.id, weighted.img_url
+        FROM weighted CROSS JOIN ticket
+        WHERE weighted.cumulative_weight >= ticket.value
+        ORDER BY weighted.id
+        LIMIT 1
+    ''')
     data = await cursor.fetchone()
     if data is None:
         await picture.finish('当前还没有图片!')
-    file_name = data[0]
+    image_id, file_name = data
     img = randpic_img_path / file_name
     try:
         await picture.send(MessageSegment.image(img))
     except Exception as e:
         logger.info(e)
         await picture.send(f'{command}出不来了，稍后再试试吧~')
+        return
+
+    await cursor.execute(
+        f'UPDATE Pic_of_{command} SET send_count = send_count + 1 WHERE id = ?',
+        (image_id,)
+    )
+    await connection.commit()
 
 
 add = on_regex(r"^添加(.+)$", permission=GROUP_ADMIN | GROUP_OWNER, priority=2, block=True)
@@ -249,7 +283,8 @@ async def _ensure_new_command(command: str) -> None:
         f'''CREATE TABLE IF NOT EXISTS Pic_of_{command} (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             img_url TEXT NOT NULL,
-            phash TEXT NOT NULL
+            phash TEXT NOT NULL,
+            send_count INTEGER NOT NULL DEFAULT 0
         )'''
     )
     await connection.commit()

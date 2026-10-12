@@ -78,13 +78,20 @@ class OSSUploaderV2:
                     body=data,
                 )
             )
+            status_code = getattr(result, 'status_code', 200)
+            if not 200 <= status_code < 300:
+                logger.error(f"✗ 上传失败: {local_file_path} (状态码: {status_code})")
+                return False
             return True
 
         except Exception as e:
             logger.error(f"✗ 上传失败: {local_file_path} (错误: {str(e)})")
             return False
         finally:
-            await client.close()
+            try:
+                await client.close()
+            except Exception as e:
+                logger.warning(f"关闭 OSS 客户端失败: {e}")
 
     async def upload_folder(
             self,
@@ -92,7 +99,7 @@ class OSSUploaderV2:
             oss_prefix: str = "",
             include_hidden: bool = False,
             overwrite: bool = True
-    ) -> None:
+    ) -> Tuple[int, int]:
         """
         上传整个文件夹到OSS
 
@@ -105,8 +112,8 @@ class OSSUploaderV2:
         # loop = asyncio.get_running_loop()
         local_folder_path = Path(local_folder_path)
         if not local_folder_path.exists():
-            print(f"错误: 本地文件夹不存在 - {local_folder_path}")
-            return
+            logger.error(f"OSS上传目录不存在: {local_folder_path}")
+            return 0, 0
         # 收集所有需要上传的文件
         files_to_upload: List[Tuple[str, str]] = []
         for root, dirs, files in os.walk(local_folder_path):
@@ -131,7 +138,7 @@ class OSSUploaderV2:
                         print(f"跳过已存在文件: {oss_key}")
                         continue
                 files_to_upload.append((str(local_file_path), oss_key))
-        print(f"找到 {len(files_to_upload)} 个文件需要上传")
+        logger.info(f"找到 {len(files_to_upload)} 个文件需要上传")
         # 分批并发上传，限制同时运行的请求数，避免大量文件时创建过多任务。
         concurrency = 16
         total = len(files_to_upload)
@@ -164,6 +171,7 @@ class OSSUploaderV2:
             await asyncio.gather(
                 *(upload_with_progress(local_file, oss_key) for local_file, oss_key in batch)
             )
+        return succeeded, failed
 
     async def check_file_exists(self, oss_key: str) -> bool:
         """
@@ -192,3 +200,8 @@ class OSSUploaderV2:
         except Exception as e:
             print(f"检查文件存在性时出错: {oss_key} (错误: {str(e)})")
             return False
+        finally:
+            try:
+                await client.close()
+            except Exception as e:
+                logger.warning(f"关闭 OSS 客户端失败: {e}")

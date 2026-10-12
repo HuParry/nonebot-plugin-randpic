@@ -32,11 +32,11 @@ def _compress_gif_bytes(image_bytes, max_size_mb=1):
                 sel_durations = [d * frame_skip for d in durations[::frame_skip]]
 
                 if scale < 1.0:
-                    new_size = tuple(int(d * scale) for d in original_size)
+                    new_size = tuple(max(1, int(d * scale)) for d in original_size)
                     sel_frames = [f.resize(new_size, Image.Resampling.LANCZOS) for f in sel_frames]
 
                 quantized = [
-                    f.quantize(colors=n_colors, method=Image.Quantize.MEDIANCUT)
+                    f.quantize(colors=n_colors, method=Image.Quantize.FASTOCTREE)
                     for f in sel_frames
                 ]
 
@@ -79,17 +79,19 @@ def _compress_static_bytes(image_bytes, max_size_mb=1, target_quality=85):
             img = img.resize(new_size, Image.Resampling.LANCZOS)
             logger.info(f"  - 调整尺寸: {original_size} -> {img.size}")
 
-        if img.mode in ('RGBA', 'LA', 'P'):
-            if img.mode == 'RGBA':
-                background = Image.new('RGB', img.size, (255, 255, 255))
-                background.paste(img, mask=img.split()[-1])
-                img = background
-            else:
-                img = img.convert('RGB')
+        if 'A' in img.getbands() or 'transparency' in img.info:
+            rgba = img.convert('RGBA')
+            background = Image.new('RGB', rgba.size, (255, 255, 255))
+            background.paste(rgba, mask=rgba.getchannel('A'))
+            img = background
+        else:
+            img = img.convert('RGB')
 
         low, high = 10, 95
         best_quality = target_quality
         best_bytes = None
+        smallest_bytes = None
+        smallest_quality = None
 
         while low <= high:
             mid = (low + high) // 2
@@ -98,6 +100,9 @@ def _compress_static_bytes(image_bytes, max_size_mb=1, target_quality=85):
             img.save(temp_stream, format='JPEG', quality=mid, optimize=True)
             current_bytes = temp_stream.getvalue()
             current_size_mb = len(current_bytes) / (1024 * 1024)
+            if smallest_bytes is None or len(current_bytes) < len(smallest_bytes):
+                smallest_bytes = current_bytes
+                smallest_quality = mid
 
             if current_size_mb <= max_size_mb:
                 best_quality = mid
@@ -110,9 +115,8 @@ def _compress_static_bytes(image_bytes, max_size_mb=1, target_quality=85):
                 high = mid - 1
 
         if best_bytes is None:
-            fallback_stream = io.BytesIO()
-            img.save(fallback_stream, format='JPEG', quality=95, optimize=True)
-            best_bytes = fallback_stream.getvalue()
+            best_bytes = smallest_bytes
+            best_quality = smallest_quality
 
         final_size_mb = len(best_bytes) / (1024 * 1024)
         logger.info(f"  - 最终质量: {best_quality}, 大小: {final_size_mb:.2f}MB")
@@ -145,7 +149,7 @@ def adaptive_compress_bytes(image_bytes, max_size_mb=1, target_quality=85):
 
 def compress_image_from_bytes(image_bytes):
     """
-    严格控制文件大小的压缩函数
+    尽可能将图片压缩到 1MB 以内；极端情况下仍可能超过目标大小。
     参数: image_bytes - 图片字节流 (bytes类型)
     返回: 压缩后的图片字节流 (bytes类型)
     """
@@ -160,10 +164,15 @@ def get_image_extension(image_bytes):
     """根据压缩后的字节内容返回正确的文件扩展名，避免依赖来源 URL 的扩展名"""
     with Image.open(io.BytesIO(image_bytes)) as img:
         fmt = img.format
-        is_animated = getattr(img, 'n_frames', 1) > 1
-    if fmt == 'GIF' and is_animated:
-        return '.gif'
-    return '.jpg'
+    extensions = {
+        'JPEG': '.jpg',
+        'PNG': '.png',
+        'GIF': '.gif',
+        'WEBP': '.webp',
+        'BMP': '.bmp',
+        'TIFF': '.tiff',
+    }
+    return extensions.get(fmt, '.jpg')
 
 
 def compress_folder_basic(folder_path, zip_path, include_subfolders=True):

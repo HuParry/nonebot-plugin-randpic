@@ -79,6 +79,7 @@ class StaticImageGalleryGenerator:
 
                 # 不上传oss的文件夹跳过
                 if folder_key in no_upload_oss_list:
+                    dirs[:] = []
                     continue
 
                 # 过滤图片文件
@@ -189,6 +190,7 @@ class StaticImageGalleryGenerator:
                 target_dir = self.output_folder
             else:
                 if rel_path in no_upload_oss_list:
+                    dirs[:] = []
                     continue
                 target_dir = self.output_folder / rel_path
                 target_dir.mkdir(parents=True, exist_ok=True)

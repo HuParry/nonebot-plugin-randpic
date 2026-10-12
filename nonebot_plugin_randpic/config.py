@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from pathlib import Path
 from pydantic import BaseModel, Extra
@@ -57,7 +58,10 @@ def load_commands_file(store_dir: str) -> Dict[str, Set[int]]:
     if not path.exists():
         logger.info(f"未找到 {path}，使用默认指令列表 {DEFAULT_COMMANDS} 并写入文件")
         default: Dict[str, Set[int]] = {name: set() for name in DEFAULT_COMMANDS}
-        save_commands_file(store_dir, default)
+        try:
+            save_commands_file(store_dir, default)
+        except OSError as e:
+            logger.error(f"无法写入默认指令配置 {path}：{e}；本次运行将使用内存中的默认配置")
         return default
     try:
         with path.open('r', encoding='utf-8') as f:
@@ -86,7 +90,10 @@ def load_commands_file(store_dir: str) -> Dict[str, Set[int]]:
                 logger.warning(f"{path} 中忽略非法名称 {name!r}（仅允许字母、汉字、数字）")
                 continue
             migrated.setdefault(name, set())
-        save_commands_file(store_dir, migrated)
+        try:
+            save_commands_file(store_dir, migrated)
+        except OSError as e:
+            logger.error(f"旧版指令配置迁移写入失败 {path}：{e}；本次运行继续使用迁移后的内存配置")
         return migrated
 
     if not isinstance(data, dict):
@@ -132,8 +139,16 @@ def save_commands_file(store_dir: str, commands: Dict[str, Set[int]]) -> None:
     path = commands_file_path(store_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     serializable = {name: sorted(gids) for name, gids in sorted(commands.items())}
-    with path.open('w', encoding='utf-8') as f:
-        json.dump(serializable, f, ensure_ascii=False, indent=2)
+    temporary_path = path.with_name(path.name + '.tmp')
+    try:
+        with temporary_path.open('w', encoding='utf-8') as f:
+            json.dump(serializable, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
 
 
 config_dict = Config.model_validate(get_driver().config.dict())

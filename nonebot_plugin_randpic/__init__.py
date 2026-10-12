@@ -1,5 +1,7 @@
 import time
 import uuid
+import os
+from pathlib import Path
 from httpx import AsyncClient
 import ssl
 from typing import Any, Dict, Set, Tuple
@@ -53,8 +55,12 @@ def _persist_commands() -> bool:
             f"新增的指令仅在本次会话内生效，重启后会丢失。"
         )
         return False
-    save_commands_file(randpic_store_dir_path, current_commands_config)
-    return True
+    try:
+        save_commands_file(randpic_store_dir_path, current_commands_config)
+        return True
+    except OSError as e:
+        logger.error(f"保存 {_config.COMMANDS_FILENAME} 失败：{e}")
+        return False
 
 
 randpic_filename: str = 'randpic_{command}_{index}'
@@ -71,6 +77,13 @@ async def _():
     await connect()
     await create_dir()
     logger.info("文件检查完成，欢迎使用！")
+
+
+@driver.on_shutdown
+async def _shutdown():
+    db_connection = globals().get("connection")
+    if db_connection is not None:
+        await db_connection.close()
 
 # 连接数据库
 async def connect():
@@ -89,13 +102,13 @@ async def _is_folder_changed(command: str, folder_path: Path) -> bool:
     row = await cursor.fetchone()
     if row is None:
         return True  # 新命令，无记录
-    return int(os.path.getmtime(folder_path)) != int(row[0])
+    return folder_path.stat().st_mtime != float(row[0])
 
 async def _save_snapshot(command: str, folder_path: Path):
     await connection.execute(
         """INSERT OR REPLACE INTO folder_snapshot (command, folder_mtime, checked_at)
            VALUES (?, ?, ?)""",
-        (command, os.path.getmtime(folder_path), time.time())
+        (command, folder_path.stat().st_mtime, time.time())
     )
     await connection.commit()
 
@@ -103,6 +116,7 @@ async def _save_snapshot(command: str, folder_path: Path):
 # 创建所需文件夹和数据库
 async def create_dir():
     command_list = sorted(current_commands_config)
+    supported_image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tif', '.tiff'}
 
     # 先创建文件夹
     for command in command_list:
@@ -142,7 +156,17 @@ async def create_dir():
     # 读取所有文件夹文件，调整文件夹内图片，并写入数据库
         global randpic_filename
         path: Path = randpic_img_path / command
-        randpic_file_list = os.listdir(path)
+        randpic_file_list = []
+        for filename in sorted(os.listdir(path)):
+            image_path = path / filename
+            extension = image_path.suffix.lower()
+            if not image_path.is_file():
+                logger.warning(f"跳过非文件路径：{image_path}")
+                continue
+            if extension and extension not in supported_image_extensions:
+                logger.warning(f"跳过不支持的图片格式：{image_path}")
+                continue
+            randpic_file_list.append(filename)
 
         # 文件名哈希化
         def get_uuid(command: str):
@@ -153,38 +177,46 @@ async def create_dir():
             filename_without_extension, filename_extension = os.path.splitext(filename)
             format_str = randpic_filename.format( command=command, index=str(i + 1).zfill(10) )
             if not filename_extension:
-                with (path / filename).open('rb') as f:
-                    data = f.read()
+                try:
+                    with (path / filename).open('rb') as f:
+                        data = f.read()
                     filename_extension = get_image_extension(data)
+                except Exception as e:
+                    logger.warning(f"无法识别无扩展名文件 {path / filename}，跳过：{e}")
+                    continue
             hash_new_filename =  f"{format_str}_{hash_str}{filename_extension}"
             os.rename(path / filename, path / hash_new_filename)
 
         # 将哈希化的文件名订正为规范名
-        randpic_file_list = os.listdir(path)
+        randpic_file_list = sorted(os.listdir(path))
         for i in range(len(randpic_file_list)):
             hash_filename = randpic_file_list[i]
+            if f"_{hash_str}" not in hash_filename:
+                continue
             new_filename = hash_filename.replace(f"_{hash_str}", '')
             os.rename(path / hash_filename, path / new_filename)
 
         # 将图片信息写入数据库
-        randpic_file_list = sorted( os.listdir(path) )
+        randpic_file_list = sorted(os.listdir(path))
         for i in range(len(randpic_file_list)):
             filename = randpic_file_list[i]
 
-            with (path / filename).open('rb') as f:
-                data = f.read()
-            data = compress_image_from_bytes(data)
-            with (path / filename).open('wb') as f:
-                f.write(data)
+            try:
+                with (path / filename).open('rb') as f:
+                    data = f.read()
+                data = compress_image_from_bytes(data)
+                with (path / filename).open('wb') as f:
+                    f.write(data)
 
-            new_phash_str = compute_phash(data)
-            cursor = await connection.cursor()
-            await cursor.execute(
-                'INSERT INTO Pic_of_{command}(img_url, phash) VALUES (?, ?)'.format(command=command),
-                (str(Path() / command / filename), new_phash_str))
-            await connection.commit()
+                new_phash_str = compute_phash(data)
+                await cursor.execute(
+                    'INSERT INTO Pic_of_{command}(img_url, phash) VALUES (?, ?)'.format(command=command),
+                    (f"{command}/{filename}", new_phash_str))
+            except Exception as e:
+                logger.warning(f"索引图片失败，跳过 {path / filename}: {e}")
 
-            await _save_snapshot(command, path)
+        await connection.commit()
+        await _save_snapshot(command, path)
 
 def web_app_init(web_driver: Driver):
     try:
@@ -211,6 +243,8 @@ web_app_init(driver)
 
 
 async def _is_known_command(event: GroupMessageEvent) -> bool:
+    if event.group_id in randpic_banner_group:
+        return False
     msg = str(event.get_message()).strip()
     disabled = current_commands_config.get(msg)
     if disabled is None:
@@ -263,17 +297,20 @@ async def pic(event: GroupMessageEvent):
         await picture.send(f'{command}出不来了，稍后再试试吧~')
         return
 
-    await cursor.execute(
-        f'UPDATE Pic_of_{command} SET send_count = send_count + 1 WHERE id = ?',
-        (image_id,)
-    )
-    await connection.commit()
+    try:
+        await cursor.execute(
+            f'UPDATE Pic_of_{command} SET send_count = send_count + 1 WHERE id = ?',
+            (image_id,)
+        )
+        await connection.commit()
+    except Exception as e:
+        logger.warning(f"图片已发送，但更新发送次数失败（分类：{command}，图片ID：{image_id}）：{e}")
 
 
 add = on_regex(r"^添加(.+)$", permission=GROUP_ADMIN | GROUP_OWNER, priority=2, block=True)
 
 
-async def _ensure_new_command(command: str) -> None:
+async def _ensure_new_command(command: str) -> bool:
     """为新指令建文件夹、建表，并加入运行时配置 + 写回 JSON。"""
     global connection
     path = randpic_img_path / command
@@ -289,13 +326,14 @@ async def _ensure_new_command(command: str) -> None:
     )
     await connection.commit()
     current_commands_config.setdefault(command, set())
-    _persist_commands()
+    persisted = _persist_commands()
     logger.info(f"已动态创建新指令分类：{command}")
+    return persisted
 
 
 @add.got("pic", prompt="请发送图片！")
 async def add_pic(matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = Arg('pic')):
-    global connection
+    global connection, persisted
     command = matched[0].strip()
 
     # 名称校验：仅允许字母、汉字、数字
@@ -305,13 +343,13 @@ async def add_pic(matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = A
     # 若是新指令，先建文件夹与数据表，再续接添加流程
     if command not in current_commands_config:
         try:
-            await _ensure_new_command(command)
+            persisted = await _ensure_new_command(command)
         except Exception as e:
             logger.warning(e)
             await add.finish(f"创建新分类「{command}」失败！")
         msg = f"已新建分类「{command}」，本张图片将作为首张保存。"
-        if not is_commands_file_writable():
-            msg += f"\n⚠️ {_config.COMMANDS_FILENAME} 损坏，本次新增不会持久化，重启后会丢失。请管理员尽快修复 JSON。"
+        if not persisted:
+            msg += f"\n⚠️ {_config.COMMANDS_FILENAME} 写入失败，本次新增指令仅当前会话有效；请检查文件权限或修复 JSON。"
         await add.send(msg)
 
     cursor = await connection.cursor()
@@ -320,69 +358,111 @@ async def add_pic(matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = A
         if pic_name.type != 'image':
             await add.send(pic_name + MessageSegment.text("\n输入格式有误，请重新触发指令！"), at_sender=True)
             continue
-        pic_url = pic_name.data['url']
+        pic_url = pic_name.data.get('url')
+        if not pic_url:
+            await add.send(pic_name + MessageSegment.text("\n无法读取图片地址，请重新发送图片！"), at_sender=True)
+            continue
         logger.info(f"正在下载图片：{pic_url}")
 
-        ssl_context = ssl.create_default_context()
-        ssl_context.set_ciphers("DEFAULT")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Referer": "https://gchat.qpic.cn/",
-            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-            "Sec-Fetch-Site": "cross-site",
-            "Sec-Fetch-Mode": "no-cors",
-            "Sec-Fetch-Dest": "image",
-        }
-        async with AsyncClient(headers=headers, verify=ssl_context, timeout=5.0) as client:
-            resp = await client.get(pic_url, timeout=5.0)
-
         try:
+            ssl_context = ssl.create_default_context()
+            ssl_context.set_ciphers("DEFAULT")
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                "Referer": "https://gchat.qpic.cn/",
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Sec-Fetch-Site": "cross-site",
+                "Sec-Fetch-Mode": "no-cors",
+                "Sec-Fetch-Dest": "image",
+            }
+            async with AsyncClient(headers=headers, verify=ssl_context, timeout=10.0) as client:
+                resp = await client.get(pic_url)
             resp.raise_for_status()
         except Exception as e:
-            logger.warning(e)
+            logger.warning(f"下载图片失败 {pic_url}: {e}")
             await add.send(
                 pic_name +
-                MessageSegment.text('\n保存出错了，这张请重试')
+                MessageSegment.text('\n下载失败了，请稍后重试')
             )
             continue
 
-        data = resp.content
-        data = compress_image_from_bytes(data)  # 若图片超规格，压缩图片
-        new_phash_str = compute_phash(data)
-        new_phash = imagehash.hex_to_hash(new_phash_str)
+        try:
+            data = compress_image_from_bytes(resp.content)
+            new_phash_str = compute_phash(data)
+            image_extension = get_image_extension(data)
+            new_phash = imagehash.hex_to_hash(new_phash_str)
+        except Exception as e:
+            logger.warning(f"图片解码或处理失败 {pic_url}: {e}")
+            await add.send(pic_name + MessageSegment.text('\n图片格式无法处理，请换一张图片重试'))
+            continue
 
         await cursor.execute(f'SELECT phash FROM Pic_of_{command}')
-        existing = await cursor.fetchall()
         SIMILARITY_THRESHOLD = 5  # 汉明距离 ≤5 认为相似
-        for ex_phash_str, in existing:
-            ex_phash = imagehash.hex_to_hash(ex_phash_str)
-            if (new_phash - ex_phash) < SIMILARITY_THRESHOLD:
-                await add.finish(pic_name + Message('\n这张已经有相似图，不能重复添加！'))
+        is_duplicate = False
+        while True:
+            row = await cursor.fetchone()
+            if row is None:
+                break
+            ex_phash_str = row[0]
+            try:
+                ex_phash = imagehash.hex_to_hash(ex_phash_str)
+            except (TypeError, ValueError) as e:
+                logger.warning(f"忽略损坏的图片感知哈希记录：{ex_phash_str!r} ({e})")
+                continue
+            if (new_phash - ex_phash) <= SIMILARITY_THRESHOLD:
+                is_duplicate = True
+                break
+        if is_duplicate:
+            await add.send(pic_name + Message('\n这张已经有相似图，不能重复添加！'), at_sender=True)
+            continue
 
-        randpic_cur_picnum = len(os.listdir(randpic_img_path / command))
-        file_name = (randpic_filename.format(command=command, index=str(randpic_cur_picnum + 1).zfill(10))
-                    + get_image_extension(data))
-        file_path = randpic_img_path / command / file_name
-
+        command_dir = randpic_img_path / command
+        index = 1
         try:
-            with file_path.open("wb") as f:
-                f.write(data)
+            while True:
+                file_name = (randpic_filename.format(command=command, index=str(index).zfill(10))
+                             + image_extension)
+                file_path = command_dir / file_name
+                try:
+                    with file_path.open("xb") as f:
+                        f.write(data)
+                    break
+                except FileExistsError:
+                    index += 1
             await cursor.execute('insert into Pic_of_{command}(img_url, phash) values (?, ?)'.format(command=command),
-                                 (str(Path() / command / file_name), new_phash_str))
+                                 (f"{command}/{file_name}", new_phash_str))
             await connection.commit()
         except Exception as e:
-            logger.warning(e)
-            await add.finish(pic_name + Message("\n导入失败！"), at_sender=True)
+            logger.warning(f"图片入库失败 {file_path}: {e}")
+            await connection.rollback()
+            try:
+                file_path.unlink()
+            except OSError:
+                logger.warning(f"无法清理未入库图片文件：{file_path}")
+            await add.send(pic_name + Message("\n导入失败！"), at_sender=True)
+            continue
 
         msg = "\n导入成功！"
         if isOss and command not in randpic_oss_no_upload_list:
             msg += f'可去 {endpoint}/{parse.quote(command)}/ 查看'
-            # StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site()
-            StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(command, file_name, randpic_oss_no_upload_list)
-            await OSSUploaderV2().upload_file(str(randpic_path/ 'public' / command / 'index.html'), f'{command}/index.html') # 修改index.html文件
-            await OSSUploaderV2().upload_file(str(randpic_path / 'public' / 'index.html'), 'index.html')
-            await OSSUploaderV2().upload_file(file_path, f'{command}/{file_name}') # 上传新增的图片到OSS
-        await add.finish(pic_name + Message(msg), at_sender=True)
+            try:
+                StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(
+                    command, file_name, randpic_oss_no_upload_list
+                )
+                uploader = OSSUploaderV2()
+                uploaded = [
+                    await uploader.upload_file(str(randpic_path / 'public' / command / 'index.html'), f'{command}/index.html'),
+                    await uploader.upload_file(str(randpic_path / 'public' / 'index.html'), 'index.html'),
+                    await uploader.upload_file(str(file_path), f'{command}/{file_name}'),
+                ]
+                if not all(uploaded):
+                    msg += '\n但 OSS 上传未全部成功，请稍后重试“上传oss”。'
+            except Exception as e:
+                logger.warning(f"图片已保存，但更新 OSS 页面失败：{e}")
+                msg += '\n但 OSS 页面更新失败，请稍后重试“上传oss”。'
+        await add.send(pic_name + Message(msg), at_sender=True)
+
+    await add.finish()
 
 OSS = on_fullmatch('上传oss', ignorecase=True, permission=GROUP_ADMIN | GROUP_OWNER, priority=1, block=True, )
 @OSS.handle()
@@ -390,13 +470,20 @@ async def handle_oss(event: GroupMessageEvent) -> None:
     if not isOss:
         return
     await OSS.send('正在上传至OSS...')
-    start_time = time.time()
-
-    StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site(randpic_oss_no_upload_list)
-    await OSSUploaderV2().upload_folder(str(randpic_path / 'public'))
-
-    end_time = time.time()
-    elapsed_time = end_time - start_time
+    start_time = time.perf_counter()
+    try:
+        StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site(
+            randpic_oss_no_upload_list
+        )
+        succeeded, failed = await OSSUploaderV2().upload_folder(str(randpic_path / 'public'))
+    except Exception as e:
+        logger.exception(f"生成或上传 OSS 静态页面失败：{e}")
+        await OSS.finish('上传失败，请查看 Bot 日志。')
+    elapsed_time = time.perf_counter() - start_time
+    if failed:
+        await OSS.finish(
+            f'上传结束，用时: {elapsed_time:.2f}秒，成功 {succeeded} 个，失败 {failed} 个。'
+        )
     await OSS.finish(f'上传完成，用时: {elapsed_time:.2f}秒，地址：{endpoint}/')
 
 
@@ -420,7 +507,7 @@ async def handle_disable(event: GroupMessageEvent, args: Message = CommandArg())
     disabled.add(gid)
     msg = f"已在本群禁用指令「{command}」。"
     if not _persist_commands():
-        msg += f"\n⚠️ {_config.COMMANDS_FILENAME} 损坏，本次禁用不会持久化，重启后会丢失。请管理员尽快修复 JSON。"
+        msg += f"\n⚠️ {_config.COMMANDS_FILENAME} 写入失败，本次修改仅当前会话有效；请检查文件权限或修复 JSON。"
     await disable.finish(msg)
 
 
@@ -443,5 +530,5 @@ async def handle_enable(event: GroupMessageEvent, args: Message = CommandArg()) 
     disabled.discard(gid)
     msg = f"已在本群重新启用指令「{command}」。"
     if not _persist_commands():
-        msg += f"\n⚠️ {_config.COMMANDS_FILENAME} 损坏，本次启用不会持久化，重启后会丢失。请管理员尽快修复 JSON。"
+        msg += f"\n⚠️ {_config.COMMANDS_FILENAME} 写入失败，本次修改仅当前会话有效；请检查文件权限或修复 JSON。"
     await enable.finish(msg)

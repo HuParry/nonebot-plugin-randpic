@@ -17,7 +17,7 @@ _✨ 一个发送指令就能让你的 bot 发出对应指令的图片的插件 
 <a href="https://pypi.python.org/pypi/nonebot-plugin-randpic">
     <img src="https://img.shields.io/pypi/v/nonebot-plugin-randpic.svg" alt="pypi">
 </a>
-<img src="https://img.shields.io/badge/python-3.8+-blue.svg" alt="python">
+<img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="python">
 
 </div>
 

@@ -1,10 +1,15 @@
-import os
+"""静态网页发布：原子替换文件、分页、懒加载，以及增删后的自动刷新。"""
+
+import hashlib
+import json
+import math
 from html import escape
 from pathlib import Path
+from typing import Dict, Iterable, List, Mapping, Sequence, Set, Tuple
 from urllib.parse import quote
 
-footer_content = '<a href="http://beian.miit.gov.cn/" target="_blank" rel="nofollow noopener">湘ICP备2025127872号-1</a>'
-FOOTER = '</main><footer>{footer}</footer></div></body></html>'.format(footer=footer_content)
+from .models import ImageRecord, RandpicError
+from .utils import atomic_write, digest_file, parse_index, safe_path
 
 GALLERY_STYLE = '''
     :root { color-scheme: light; --ink: #18201d; --muted: #758079; --paper: #f5f6f2; --card: #fff; --line: #e7eae4; --accent: #286b55; --accent-soft: #e7f1eb; }
@@ -58,197 +63,139 @@ GALLERY_STYLE = '''
 '''
 
 
-class StaticImageGalleryGenerator:
-    def __init__(self, source_folder, output_folder):
-        self.source_folder = Path(source_folder)
-        self.output_folder = Path(output_folder)
-        self.supported_formats = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.svg'}
+def _url(image: ImageRecord) -> str:
+    return quote(image.filename, safe='') + '?v=' + image.content_hash[:16]
 
-    def get_all_images_with_folders(self, no_upload_oss_list):
-        """获取所有文件夹及其包含的图片文件"""
-        result = {}
 
-        if self.source_folder.exists():
-            for root, dirs, files in os.walk(self.source_folder):
-                # 计算相对路径
-                rel_path = os.path.relpath(root, self.source_folder)
-                if rel_path == '.':
-                    folder_key = ''
-                else:
-                    folder_key = rel_path
+def _shell(title: str, home: str, version: str, command: str, page: int, content: str) -> str:
+    state = json.dumps({'version': version, 'command': command, 'page': page}, ensure_ascii=False).replace('<', '\\u003c')
+    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f5f6f2">
+<title>{escape(title)} · Randpic</title><style>{GALLERY_STYLE}
+.pagination {{display:flex;gap:14px;justify-content:center;align-items:center;margin:0 0 35px}}
+.pagination a {{color:var(--accent);text-decoration:none}} .pagination span {{color:var(--muted)}}
+</style></head><body><div class="shell">
+<nav class="topbar"><a class="brand" href="{home}"><span class="brand-mark">✳</span><span>RANDPIC / 图片收藏馆</span></a><span class="top-note">捕捉喜欢的瞬间</span></nav>
+{content}<footer>Randpic · 收藏每一个喜欢的瞬间</footer></div>
+<script>(()=>{{const state={state}; const home={json.dumps(home)};
+setInterval(async()=>{{if(document.hidden)return;try{{
+const response=await fetch(home+'catalog.json',{{cache:'no-store'}});if(!response.ok)return;
+const next=await response.json();if(next.version===state.version)return;
+if(state.command && (!(state.command in next.pages)||state.page>next.pages[state.command])){{location.href=state.command in next.pages?'./':home;return;}}
+location.reload();}}catch(error){{}}}},15000);}})();</script></body></html>'''
 
-                # 不上传oss的文件夹跳过
-                if folder_key in no_upload_oss_list:
-                    dirs[:] = []
-                    continue
 
-                # 过滤图片文件
-                image_files = []
-                for filename in files:
-                    if Path(filename).suffix.lower() in self.supported_formats:
-                        image_files.append(filename)
+def render_catalog(groups: Mapping[str, Sequence[ImageRecord]], page_size: int) -> Dict[str, bytes]:
+    """相同图库总是产生相同 HTML；发送次数变化不会导致网页重复刷新。"""
+    identity = [(command, [(image.id, image.filename, image.content_hash) for image in images])
+                for command, images in sorted(groups.items())]
+    version = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+    pages = {command: max(1, math.ceil(len(images) / page_size)) for command, images in groups.items()}
+    catalog = json.dumps({'version': version, 'pages': pages}, ensure_ascii=False, sort_keys=True).encode()
+    files = {'catalog.json': catalog}
+    total = sum(len(images) for images in groups.values())
+    cards = []
+    for command, images in sorted(groups.items()):
+        folder_url = './' + quote(command, safe='') + '/'
+        cover = (f'<img src="{escape(folder_url + _url(images[0]), quote=True)}" alt="" loading="lazy">'
+                 if images else '<div class="cover-placeholder">✳</div>')
+        cards.append(f'''<a class="folder-card" href="{escape(folder_url, quote=True)}"><div class="folder-cover">{cover}</div>
+<div class="folder-body"><div><div class="folder-name">{escape(command)}</div><div class="folder-meta">{len(images)} 张图片</div></div><span class="arrow">↗</span></div></a>''')
+    if not cards:
+        cards.append('<div class="empty">图片库还是空的，添加图片后就会显示在这里。</div>')
+    home = f'''<header class="hero"><p class="eyebrow">YOUR IMAGE LIBRARY</p><h1>每一张，都值得<br>被好好收藏。</h1>
+<p class="hero-copy">在这里慢慢翻看收藏的每一份灵感。</p></header><div class="section-head"><h2>全部分类</h2>
+<span class="count">{len(groups)} 个分类　·　{total} 张图片</span></div><main class="folder-grid">{''.join(cards)}</main>'''
+    files['index.html'] = _shell('图片收藏馆', './', version, '', 1, home).encode()
+    for command, images in groups.items():
+        for page in range(1, pages[command] + 1):
+            cards = []
+            for image in images[(page - 1) * page_size:page * page_size]:
+                url, name = escape(_url(image), quote=True), escape(image.filename)
+                cards.append(f'''<article class="image-card"><a class="image-link" href="{url}" target="_blank" rel="noopener">
+<img class="image-preview" src="{url}" alt="{name}" loading="lazy"></a><div class="image-info"><span class="image-name" title="{name}">{name}</span>
+<a class="open-link" href="{url}" target="_blank" rel="noopener">查看 ↗</a></div></article>''')
+            if not cards:
+                cards.append('<div class="empty">这个分类暂时还没有图片。</div>')
+            navigation = []
+            if page > 1:
+                previous = './' if page == 2 else f'./page-{page - 1}.html'
+                navigation.append(f'<a href="{previous}">← 上一页</a>')
+            navigation.append(f'<span>第 {page} / {pages[command]} 页</span>')
+            if page < pages[command]:
+                navigation.append(f'<a href="./page-{page + 1}.html">下一页 →</a>')
+            content = f'''<div class="crumbs"><a href="../">全部分类</a><span>／</span><span>{escape(command)}</span></div>
+<header class="gallery-title"><p class="eyebrow">COLLECTION</p><h1>{escape(command)}</h1><p class="hero-copy">本分类共收藏 {len(images)} 张图片。</p></header>
+<main class="image-grid">{''.join(cards)}</main><nav class="pagination">{''.join(navigation)}</nav>'''
+            filename = 'index.html' if page == 1 else f'page-{page}.html'
+            files[f'{command}/{filename}'] = _shell(command, '../', version, command, page, content).encode()
+    return files
 
-                if image_files:  # 只有包含图片的文件夹才添加
-                    result[folder_key] = {
-                        'path': rel_path,
-                        'images': sorted(image_files),
-                        'image_count': len(image_files),
-                        'subfolders': dirs
-                    }
 
-        return result
+class GalleryPublisher:
+    def __init__(self, root: Path, page_size: int = 100):
+        self.root = root
+        self.image_root = root / 'img'
+        self.local_directory = root / 'public'
+        self.remote_directory = root / 'database' / 'oss_pages'
+        self.page_size = page_size
+        self._asset_hashes: Dict[str, str] = {}
 
-    def generate_index_html(self, all_folders):
-        """生成主页HTML"""
-        total_images = sum(folder['image_count'] for folder in all_folders.values())
-        parts = [f'''<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f5f6f2"><title>图片收藏馆 · Randpic</title>
-<style>{GALLERY_STYLE}</style></head><body><div class="shell">
-<nav class="topbar"><a class="brand" href="./"><span class="brand-mark">✳</span><span>RANDPIC <span style="color:#8b958e;font-weight:500">/ 图片收藏馆</span></span></a><span class="top-note">捕捉喜欢的瞬间</span></nav>
-<header class="hero"><p class="eyebrow">YOUR IMAGE LIBRARY</p><h1>每一张，都值得<br>被好好收藏。</h1><p class="hero-copy">在这里慢慢翻看收藏的每一份灵感。</p></header>
-<div class="section-head"><h2>全部分类</h2><span class="count">{len(all_folders)} 个分类　·　{total_images} 张图片</span></div>
-<main class="folder-grid">''']
+    @staticmethod
+    def _write_pages(directory: Path, pages: Mapping[str, bytes]) -> None:
+        for key, data in pages.items():
+            path = directory / key
+            if path.is_symlink() or path.parent.is_symlink():
+                raise RandpicError('网页输出目录不能包含符号链接。')
+            if not path.exists() or path.read_bytes() != data:
+                atomic_write(path, data)
 
-        if not all_folders:
-            parts.append('<div class="empty">图片库还是空的，添加图片后就会显示在这里。</div>')
-        for folder_key, folder_info in all_folders.items():
-            display_name = folder_key or '根目录'
-            folder_url = './' if not folder_key else f'./{quote(folder_key, safe="/")}/'
-            images = folder_info['images']
-            cover_url = f'{folder_url}{quote(images[0], safe="")}' if images else ''
-            cover = (f'<img src="{escape(cover_url, quote=True)}" alt="" loading="lazy">'
-                     if cover_url else '<div class="cover-placeholder">✳</div>')
-            parts.append(f'''<a class="folder-card" href="{escape(folder_url, quote=True)}">
-<div class="folder-cover">{cover}</div><div class="folder-body"><div><div class="folder-name">{escape(display_name)}</div>
-<div class="folder-meta">{folder_info['image_count']} 张图片</div></div><span class="arrow">↗</span></div></a>''')
-        parts.append(FOOTER)
-        return ''.join(parts)
+    @staticmethod
+    def _prune(directory: Path, wanted: Set[str]) -> None:
+        for path in sorted(directory.rglob('*'), reverse=True):
+            if path.is_symlink():
+                path.unlink()
+            elif path.is_file() and path.relative_to(directory).as_posix() not in wanted:
+                path.unlink()
+            elif path.is_dir():
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
 
-    def generate_folder_html(self, folder_info, folder_path):
-        """生成文件夹页面HTML"""
-        title = folder_path or '根目录'
-        parts = [f'''<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f5f6f2"><title>{escape(title)} · Randpic</title>
-<style>{GALLERY_STYLE}</style></head><body><div class="shell">
-<nav class="topbar"><a class="brand" href="../"><span class="brand-mark">✳</span><span>RANDPIC <span style="color:#8b958e;font-weight:500">/ 图片收藏馆</span></span></a><span class="top-note">{folder_info['image_count']} 张收藏</span></nav>
-<div class="crumbs"><a href="../">全部分类</a><span>／</span><span>{escape(title)}</span></div>
-<header class="gallery-title"><p class="eyebrow">COLLECTION</p><h1>{escape(title)}</h1><p class="hero-copy">本分类共收藏 {folder_info['image_count']} 张图片。</p></header>''']
-        if folder_info['subfolders']:
-            parts.append('<nav class="subfolders" aria-label="子文件夹">')
-            for subfolder in folder_info['subfolders']:
-                subfolder_url = f'./{quote(subfolder, safe="")}/index.html'
-                parts.append(f'<a class="subfolder" href="{escape(subfolder_url, quote=True)}">↗　{escape(subfolder)}</a>')
-            parts.append('</nav>')
-        parts.append('<main class="image-grid">')
-        if not folder_info['images']:
-            parts.append('<div class="empty">这个分类暂时还没有图片。</div>')
-        for image in folder_info['images']:
-            image_url = quote(image, safe="")
-            safe_url = escape(image_url, quote=True)
-            safe_name = escape(image)
-            parts.append(f'''<article class="image-card"><a class="image-link" href="{safe_url}" target="_blank" rel="noopener">
-<img class="image-preview" src="{safe_url}" alt="{safe_name}" loading="lazy"></a>
-<div class="image-info"><span class="image-name" title="{safe_name}">{safe_name}</span><a class="open-link" href="{safe_url}" target="_blank" rel="noopener">查看 ↗</a></div></article>''')
-        parts.append(FOOTER)
-        return ''.join(parts)
-
-    def generate_static_site(self, no_upload_oss_list):
-        """生成静态网站"""
-        all_folders = self.get_all_images_with_folders(no_upload_oss_list)
-        import shutil
-        if self.output_folder.exists():
-            shutil.rmtree(self.output_folder)
-        # 创建输出文件夹
-        self.output_folder.mkdir(parents=True, exist_ok=True)
-
-        # 生成主页
-        index_html = self.generate_index_html(all_folders)
-        (self.output_folder / 'index.html').write_text(index_html, encoding='utf-8')
-
-        # 为每个文件夹生成页面
-        for folder_key, folder_info in all_folders.items():
-            if folder_key == '':
-                # 根目录的图片页面放在根目录
-                folder_dir = self.output_folder
-            else:
-                # 子文件夹的页面放在对应子文件夹中
-                folder_dir = self.output_folder / folder_key
-                folder_dir.mkdir(parents=True, exist_ok=True)
-
-            folder_html = self.generate_folder_html(folder_info, folder_key)
-            (folder_dir / 'index.html').write_text(folder_html, encoding='utf-8')
-
-        print(f"静态网站已生成到: {self.output_folder}")
-        print(f"包含 {len(all_folders)} 个文件夹页面")
-
-        # 复制图片文件
-        for root, dirs, files in os.walk(self.source_folder):
-            rel_path = os.path.relpath(root, self.source_folder)
-            if rel_path == '.':
-                target_dir = self.output_folder
-            else:
-                if rel_path in no_upload_oss_list:
-                    dirs[:] = []
-                    continue
-                target_dir = self.output_folder / rel_path
-                target_dir.mkdir(parents=True, exist_ok=True)
-
-            for file in files:
-                if Path(file).suffix.lower() in self.supported_formats:
-                    source_file = Path(root) / file
-                    target_file = target_dir / file
-                    # 复制文件（可以改为硬链接以节省空间）
-                    shutil.copy2(source_file, target_file)
-
-    def remove_command_image(self, folder_key: str, file_name: str, no_upload_oss_list):
-        """移除网页中的图片副本，并刷新分类页和首页，兼容删除分类最后一张图。"""
-        self.output_folder.mkdir(parents=True, exist_ok=True)
-        folder_dir = self.output_folder / folder_key
-        (folder_dir / file_name).unlink(missing_ok=True)
-        all_folders = self.get_all_images_with_folders(no_upload_oss_list)
-        if folder_key in no_upload_oss_list:
-            (folder_dir / 'index.html').unlink(missing_ok=True)
-        else:
-            folder_dir.mkdir(parents=True, exist_ok=True)
-            folder_info = all_folders.get(folder_key, {
-                'path': folder_key, 'images': [], 'image_count': 0, 'subfolders': [],
-            })
-            (folder_dir / 'index.html').write_text(
-                self.generate_folder_html(folder_info, folder_key), encoding='utf-8'
-            )
-        (self.output_folder / 'index.html').write_text(
-            self.generate_index_html(all_folders), encoding='utf-8'
-        )
-
-    def generate_command_html(self, folder_key: str, file_name: str, no_upload_oss_list):
-        if folder_key in no_upload_oss_list:
-            return
-        all_folders = self.get_all_images_with_folders(no_upload_oss_list)
-        folder_info = all_folders[folder_key]
-        folder_html = self.generate_folder_html(folder_info, folder_key)
-
-        source_folder2 = self.source_folder / folder_key
-        output_folder2 = self.output_folder / folder_key
-        if not source_folder2.exists():
-            source_folder2.mkdir(parents=True, exist_ok=True)
-        if not output_folder2.exists():
-            output_folder2.mkdir(parents=True, exist_ok=True)
-
-        folder_dir = self.output_folder / folder_key
-        (folder_dir / 'index.html').write_text(folder_html, encoding='utf-8')
-        # 生成主页
-        index_html = self.generate_index_html(all_folders)
-        (self.output_folder / 'index.html').write_text(index_html, encoding='utf-8')
-
-        source_file = self.source_folder / folder_key / file_name
-        target_file = self.output_folder / folder_key / file_name
-        import shutil
-        shutil.copy2(source_file, target_file)
-
-# 测试
-if __name__ == "__main__":
-    # 源文件夹路径和输出文件夹路径
-    source_folder = "C:\\Users\\hu_pa\\Desktop\\randpic"  # 源图片文件夹
-    output_folder = "C:\\Users\\hu_pa\\Desktop\\nonebot\\nonebot-plugin-randpic\\static"  # 输出静态网站文件夹
+    def publish(self, images: Sequence[ImageRecord], commands: Iterable[str], excluded: Set[str]) -> Dict[str, Tuple[str, str]]:
+        for directory in (self.local_directory, self.remote_directory):
+            if directory.is_symlink():
+                raise RandpicError('网页输出目录不能是符号链接。')
+            directory.mkdir(parents=True, exist_ok=True)
+        groups: Dict[str, List[ImageRecord]] = {command: [] for command in sorted(commands)}
+        for image in images:
+            if image.command in groups:
+                groups[image.command].append(image)
+        for command in groups:
+            groups[command].sort(key=lambda image: (parse_index(Path(image.filename).stem, command) or 0, image.filename))
+        assets: Dict[str, str] = {}
+        for group in groups.values():
+            for image in group:
+                path = safe_path(self.local_directory, image.key)
+                known = self._asset_hashes.get(image.key) == image.content_hash
+                if not known or not path.exists() or path.stat().st_size != image.byte_size:
+                    if not path.exists() or digest_file(path) != image.content_hash:
+                        data = safe_path(self.image_root, image.key).read_bytes()
+                        if hashlib.sha256(data).hexdigest() != image.content_hash:
+                            raise RandpicError(f'图片文件在运行时被修改：{image.key}')
+                        atomic_write(path, data)
+                assets[image.key] = image.content_hash
+        local_pages = render_catalog(groups, self.page_size)
+        self._write_pages(self.local_directory, local_pages)
+        self._prune(self.local_directory, set(local_pages) | set(assets))
+        remote_groups = {command: group for command, group in groups.items() if command not in excluded}
+        remote_pages = render_catalog(remote_groups, self.page_size)
+        self._write_pages(self.remote_directory, remote_pages)
+        self._prune(self.remote_directory, set(remote_pages))
+        self._asset_hashes = assets
+        manifest = {key: (str(self.remote_directory / key), hashlib.sha256(data).hexdigest())
+                    for key, data in remote_pages.items()}
+        manifest.update({image.key: (str(self.local_directory / image.key), image.content_hash)
+                         for group in remote_groups.values() for image in group})
+        return manifest

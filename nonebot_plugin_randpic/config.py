@@ -1,169 +1,100 @@
+"""插件设置与向后兼容的指令配置文件。"""
+
 import json
-import os
-import re
 from pathlib import Path
-from pydantic import BaseModel, Extra
-from typing import Dict, List, Optional, Set
-from nonebot import require
-from nonebot import get_driver
+from typing import Dict, FrozenSet, List, Optional
+
 from nonebot.log import logger
+from pydantic import BaseModel, Field
 
-require("nonebot_plugin_localstore")
-
-from nonebot_plugin_localstore import get_data_dir
-
-
-class Config(BaseModel, extra='ignore'):
-    randpic_store_dir_path: str = get_data_dir("nonebot_plugin_randpic")  # 用户自定义图片存储文件夹
-    randpic_banner_group: List[int] = []  # 禁用群组列表
-    randpic_endpoint: Optional[str] = None               # 建议填写自定义域名，尾部不用加/
-    randpic_bucket: Optional[str] = None            # 存储空间名称
-    randpic_region: Optional[str] = None               # Bucket所在地域
-    randpic_oss_access_key_id: Optional[str] = None      # 阿里云用户AccessKey ID
-    randpic_oss_access_key_secret: Optional[str] = None  # 阿里云用户AccessKey Secret
-    randpic_oss_no_upload_list: List[str] = [] # 不上传oss的指令数组
+from .utils import atomic_write, valid_command
 
 
-COMMANDS_FILENAME = 'randpic_commands.json'
-DEFAULT_COMMANDS: List[str] = ["capoo"]
+class Config(BaseModel):
+    randpic_store_dir_path: Optional[Path] = None
+    randpic_banner_group: List[int] = Field(default_factory=list)
+    randpic_endpoint: Optional[str] = None
+    randpic_bucket: Optional[str] = None
+    randpic_region: Optional[str] = None
+    randpic_oss_access_key_id: Optional[str] = None
+    randpic_oss_access_key_secret: Optional[str] = None
+    randpic_oss_no_upload_list: List[str] = Field(default_factory=list)
+    randpic_upload_concurrency: int = Field(default=16, ge=1, le=64)
+    randpic_download_max_mb: int = Field(default=32, ge=1, le=256)
+    randpic_download_timeout: float = Field(default=30.0, gt=0, le=300)
+    randpic_web_page_size: int = Field(default=100, ge=1, le=500)
 
-# 名称合法字符集：仅允许字母、数字、汉字。SQL 表名、文件夹名都会按原样使用，
-# 必须收紧字符集，否则会出现 SQL 注入 / 语法错 / 文件系统报错。
-VALID_COMMAND_PATTERN = re.compile(r"^[A-Za-z0-9一-龥]+$")
+    class Config:
+        extra = 'ignore'
 
-# JSON 文件健康状态。文件不存在不算损坏（首次启动场景）；
-# 解析失败或顶层不是 list 视为损坏，运行时禁止写回以保护管理员的原始内容。
-commands_file_corrupted: bool = False
-
-
-def is_commands_file_writable() -> bool:
-    return not commands_file_corrupted
+    @property
+    def oss_enabled(self) -> bool:
+        return all((self.randpic_endpoint, self.randpic_bucket, self.randpic_region,
+                    self.randpic_oss_access_key_id, self.randpic_oss_access_key_secret))
 
 
-def commands_file_path(store_dir: str) -> Path:
-    return Path(store_dir) / COMMANDS_FILENAME
+class CommandSettings:
+    """保留旧版 list[str] 和 dict[str, list[int]] 格式；损坏的文件绝不覆盖。"""
 
+    def __init__(self, root: Path):
+        self.path = root / 'randpic_commands.json'
+        self.commands: Dict[str, FrozenSet[int]] = {}
+        self.writable = True
 
-def load_commands_file(store_dir: str) -> Dict[str, Set[int]]:
-    """读取指令配置 JSON。返回「指令名 -> 该指令被禁用的群号集合」映射。
-
-    - 文件不存在：写入默认配置并返回。
-    - 解析失败 / 顶层既不是 list 也不是 dict：置 corrupted 标记，返回空字典，运行时不再覆盖。
-    - 旧格式兼容（顶层为 list of str）：等价为「指令名 -> 空集合」，并立即迁移写回为新版 dict 格式。
-    - 新格式（顶层为 dict）：键是指令名，值是禁用群号的 list[int]。
-    - 单条非法（指令名非 str/空/含特殊字符、群号非 int）：跳过并告警。
-    """
-    global commands_file_corrupted
-    path = commands_file_path(store_dir)
-    if not path.exists():
-        logger.info(f"未找到 {path}，使用默认指令列表 {DEFAULT_COMMANDS} 并写入文件")
-        default: Dict[str, Set[int]] = {name: set() for name in DEFAULT_COMMANDS}
+    def load(self) -> None:
+        if not self.path.exists():
+            self.commands = {'capoo': frozenset()}
+            self.save()
+            return
         try:
-            save_commands_file(store_dir, default)
-        except OSError as e:
-            logger.error(f"无法写入默认指令配置 {path}：{e}；本次运行将使用内存中的默认配置")
-        return default
-    try:
-        with path.open('r', encoding='utf-8') as f:
-            data = json.load(f)
-    except Exception as e:
-        commands_file_corrupted = True
-        logger.error(
-            f"读取 {path} 失败（JSON 格式错误）：{e}；本次启动以空指令列表运行，"
-            f"且运行时不会写回此文件以避免覆盖。请修复后重启 bot。"
-        )
-        return {}
+            data = json.loads(self.path.read_text(encoding='utf-8'))
+            if isinstance(data, list):
+                entries = [(name, []) for name in data]
+            elif isinstance(data, dict):
+                entries = list(data.items())
+            else:
+                raise ValueError('顶层必须是对象或旧版指令数组')
+        except (OSError, ValueError) as exc:
+            self.writable = False
+            self.commands = {}
+            logger.error(f'读取指令配置失败，保留原文件并以空指令列表运行：{self.path} ({exc})')
+            return
+        commands: Dict[str, FrozenSet[int]] = {}
+        for name, groups in entries:
+            if not isinstance(name, str) or not valid_command(name.strip()):
+                logger.warning(f'指令配置中忽略非法名称：{name!r}')
+                continue
+            name = name.strip()
+            if not isinstance(groups, list):
+                logger.warning(f'指令「{name}」的禁用群列表无效，视为空列表。')
+                groups = []
+            valid_groups = frozenset(g for g in groups if type(g) is int and g > 0)
+            commands[name] = commands.get(name, frozenset()) | valid_groups
+        self.commands = commands
+        if isinstance(data, list):
+            self.save()
 
-    # 旧格式：顶层 list[str]，自动迁移为新版 dict 并立即回写
-    if isinstance(data, list):
-        logger.info(f"{path} 为旧版数组格式，将迁移为新版字典格式（每个指令带空的禁用群号列表）")
-        migrated: Dict[str, Set[int]] = {}
-        for x in data:
-            if not isinstance(x, str):
-                logger.warning(f"{path} 中忽略非字符串条目: {x!r}")
-                continue
-            name = x.strip()
-            if not name:
-                logger.warning(f"{path} 中忽略空字符串条目")
-                continue
-            if not VALID_COMMAND_PATTERN.fullmatch(name):
-                logger.warning(f"{path} 中忽略非法名称 {name!r}（仅允许字母、汉字、数字）")
-                continue
-            migrated.setdefault(name, set())
+    def save(self) -> bool:
+        if not self.writable:
+            return False
         try:
-            save_commands_file(store_dir, migrated)
-        except OSError as e:
-            logger.error(f"旧版指令配置迁移写入失败 {path}：{e}；本次运行继续使用迁移后的内存配置")
-        return migrated
+            data = {name: sorted(groups) for name, groups in sorted(self.commands.items())}
+            atomic_write(self.path, (json.dumps(data, ensure_ascii=False, indent=2) + '\n').encode())
+            return True
+        except OSError as exc:
+            logger.error(f'保存指令配置失败，本次修改仅在当前运行中生效：{exc}')
+            return False
 
-    if not isinstance(data, dict):
-        commands_file_corrupted = True
-        logger.error(
-            f"{path} 顶层必须是 dict 或旧版的 list[str]，得到 {type(data).__name__}；本次启动以空指令列表运行，"
-            f"且运行时不会写回此文件。"
-        )
-        return {}
+    def add(self, command: str) -> bool:
+        if not valid_command(command):
+            raise ValueError('名称仅支持字母、汉字、数字，且长度不能超过 120 字节。')
+        if command in self.commands:
+            return True
+        self.commands = {**self.commands, command: frozenset()}
+        return self.save()
 
-    result: Dict[str, Set[int]] = {}
-    for name, disabled in data.items():
-        if not isinstance(name, str):
-            logger.warning(f"{path} 中忽略非字符串键: {name!r}")
-            continue
-        name = name.strip()
-        if not name:
-            logger.warning(f"{path} 中忽略空字符串键")
-            continue
-        if not VALID_COMMAND_PATTERN.fullmatch(name):
-            logger.warning(f"{path} 中忽略非法名称 {name!r}（仅允许字母、汉字、数字）")
-            continue
-        if not isinstance(disabled, list):
-            logger.warning(f"{path} 中指令 {name!r} 的禁用群号必须是数组，得到 {type(disabled).__name__}；视为空")
-            result.setdefault(name, set())
-            continue
-        gids: Set[int] = set()
-        for g in disabled:
-            # bool 是 int 的子类，要单独排除，避免 True/False 被当成群号
-            if isinstance(g, bool) or not isinstance(g, int):
-                logger.warning(f"{path} 中指令 {name!r} 忽略非整数群号: {g!r}")
-                continue
-            gids.add(g)
-        result[name] = gids
-    return result
-
-
-def save_commands_file(store_dir: str, commands: Dict[str, Set[int]]) -> None:
-    """全量覆盖写入指令配置 JSON。注意：调用方应先检查 is_commands_file_writable()。
-
-    文件结构：`{ "指令名": [禁用群号, ...], ... }`。键按字母排序，群号按升序，保证可读性。
-    """
-    path = commands_file_path(store_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    serializable = {name: sorted(gids) for name, gids in sorted(commands.items())}
-    temporary_path = path.with_name(path.name + '.tmp')
-    try:
-        with temporary_path.open('w', encoding='utf-8') as f:
-            json.dump(serializable, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
-
-
-config_dict = Config.model_validate(get_driver().config.dict())
-randpic_store_dir_path: str = config_dict.randpic_store_dir_path
-randpic_banner_group = config_dict.randpic_banner_group
-
-# 指令配置唯一来源：randpic_commands.json
-# 结构：{ 指令名 -> 该指令被禁用的群号集合 }；运行时被插件直接读写，保存时整体回写。
-randpic_commands_config: Dict[str, Set[int]] = load_commands_file(randpic_store_dir_path)
-# 仅作快照，保留旧名以兼容外部引用；运行期请通过 randpic_commands_config 取最新键集合。
-randpic_command_list: List[str] = list(randpic_commands_config.keys())
-
-randpic_endpoint = config_dict.randpic_endpoint
-randpic_bucket = config_dict.randpic_bucket
-randpic_region = config_dict.randpic_region
-randpic_oss_access_key_id = config_dict.randpic_oss_access_key_id
-randpic_oss_access_key_secret = config_dict.randpic_oss_access_key_secret
-randpic_oss_no_upload_list = config_dict.randpic_oss_no_upload_list
+    def set_disabled(self, command: str, group_id: int, disabled: bool) -> bool:
+        groups = self.commands[command]
+        groups = groups | {group_id} if disabled else groups - {group_id}
+        self.commands = {**self.commands, command: frozenset(groups)}
+        return self.save()

@@ -1,230 +1,161 @@
-import zipfile
-from pathlib import Path
-from nonebot.log import logger
-from PIL import Image
-import imagehash
+"""验证、压缩和识别图片。所有入口均在线程中调用，避免阻塞 Bot 事件循环。"""
+
+import hashlib
 import io
+import warnings
+from dataclasses import dataclass
+from typing import Optional
+
+import imagehash
+from PIL import Image, ImageOps, ImageSequence
+
+from .models import InvalidImage
 
 
-def _compress_gif_bytes(image_bytes, max_size_mb=1, log_progress=True):
-    """压缩动态GIF，保留动画效果。按帧跳过 → 缩放 → 减色的顺序逐步加大压缩力度。"""
-    image_stream = io.BytesIO(image_bytes)
-    img = Image.open(image_stream)
-    loop = img.info.get('loop', 0)
-
-    frames, durations = [], []
-    try:
-        while True:
-            frames.append(img.copy().convert('RGBA'))
-            durations.append(img.info.get('duration', 100))
-            img.seek(img.tell() + 1)
-    except EOFError:
-        pass
-
-    original_size = frames[0].size
-    best_bytes = None
-
-    for frame_skip in [1, 2, 3, 4]:
-        for scale in [1.0, 0.75, 0.5]:
-            for n_colors in [256, 128, 64]:
-                sel_frames = frames[::frame_skip]
-                # 跳帧后将帧时长乘以 frame_skip，保持动画整体播放速度不变
-                sel_durations = [d * frame_skip for d in durations[::frame_skip]]
-
-                if scale < 1.0:
-                    new_size = tuple(max(1, int(d * scale)) for d in original_size)
-                    sel_frames = [f.resize(new_size, Image.Resampling.LANCZOS) for f in sel_frames]
-
-                quantized = [
-                    f.quantize(colors=n_colors, method=Image.Quantize.FASTOCTREE)
-                    for f in sel_frames
-                ]
-
-                out = io.BytesIO()
-                quantized[0].save(
-                    out, format='GIF', save_all=True,
-                    append_images=quantized[1:],
-                    loop=loop, duration=sel_durations, optimize=True
-                )
-
-                result = out.getvalue()
-                result_mb = len(result) / (1024 * 1024)
-
-                if best_bytes is None or len(result) < len(best_bytes):
-                    best_bytes = result
-
-                if result_mb <= max_size_mb:
-                    if log_progress:
-                        logger.info(
-                            f"GIF压缩完成: 帧跳过={frame_skip}, 缩放={scale:.2f}, "
-                            f"颜色={n_colors}, 大小={result_mb:.2f}MB"
-                        )
-                    return result
-
-    logger.warning(
-        f"GIF无法压缩到 {max_size_mb}MB 以内，"
-        f"返回最小版本 ({len(best_bytes) / (1024 * 1024):.2f}MB)"
-    )
-    return best_bytes
+FORMATS = {'JPEG': '.jpg', 'PNG': '.png', 'GIF': '.gif', 'WEBP': '.webp', 'BMP': '.bmp', 'TIFF': '.tiff'}
+MAX_BYTES = 1024 * 1024
+MAX_PIXELS = 40_000_000
+MAX_ANIMATION_PIXELS = 100_000_000
+MAX_FRAMES = 400
 
 
-def _compress_static_bytes(image_bytes, max_size_mb=1, target_quality=85, log_progress=True):
-    """压缩静态图片（JPEG/PNG 等），转为 JPEG 输出。"""
-    image_stream = io.BytesIO(image_bytes)
-    with Image.open(image_stream) as img:
-        original_size = img.size
+@dataclass(frozen=True)
+class ProcessedImage:
+    data: bytes
+    extension: str
+    content_hash: str
+    phash: str
+    original_hash: str
 
-        if max(img.size) > 1920:
-            scale = 1920 / max(img.size)
-            new_size = tuple(int(dim * scale) for dim in img.size)
-            img = img.resize(new_size, Image.Resampling.LANCZOS)
-            if log_progress:
-                logger.info(f"  - 调整尺寸: {original_size} -> {img.size}")
 
-        if 'A' in img.getbands() or 'transparency' in img.info:
-            rgba = img.convert('RGBA')
-            background = Image.new('RGB', rgba.size, (255, 255, 255))
-            background.paste(rgba, mask=rgba.getchannel('A'))
-            img = background
-        else:
-            img = img.convert('RGB')
+def _open(data: bytes) -> Image.Image:
+    image = Image.open(io.BytesIO(data))
+    if image.format not in FORMATS:
+        image.close()
+        raise InvalidImage('不支持这种图片格式，请使用 JPG、PNG、GIF、WebP、BMP 或 TIFF。')
+    if image.width * image.height > MAX_PIXELS:
+        image.close()
+        raise InvalidImage('图片像素过大，请缩小图片后重试。')
+    return image
 
-        low, high = 10, 95
-        best_quality = target_quality
-        best_bytes = None
-        smallest_bytes = None
-        smallest_quality = None
 
+def _rgb(image: Image.Image) -> Image.Image:
+    rgba = image.convert('RGBA')
+    background = Image.new('RGB', image.size, 'white')
+    background.paste(rgba, mask=rgba.getchannel('A'))
+    return background
+
+
+def _static(data: bytes, max_bytes: int, target_quality: int) -> bytes:
+    with _open(data) as source:
+        image = _rgb(ImageOps.exif_transpose(source))
+    image.thumbnail((1920, 1920), Image.Resampling.LANCZOS)
+    while True:
+        best: Optional[bytes] = None
+        low, high = 10, max(10, min(95, target_quality))
         while low <= high:
-            mid = (low + high) // 2
-
-            temp_stream = io.BytesIO()
-            img.save(temp_stream, format='JPEG', quality=mid, optimize=True)
-            current_bytes = temp_stream.getvalue()
-            current_size_mb = len(current_bytes) / (1024 * 1024)
-            if smallest_bytes is None or len(current_bytes) < len(smallest_bytes):
-                smallest_bytes = current_bytes
-                smallest_quality = mid
-
-            if current_size_mb <= max_size_mb:
-                best_quality = mid
-                best_bytes = current_bytes
-                if current_size_mb <= max_size_mb * 0.9:
-                    low = mid + 1
-                else:
-                    break
+            quality = (low + high) // 2
+            output = io.BytesIO()
+            image.save(output, format='JPEG', quality=quality, optimize=True)
+            candidate = output.getvalue()
+            if len(candidate) <= max_bytes:
+                best = candidate
+                low = quality + 1
             else:
-                high = mid - 1
-
-        if best_bytes is None:
-            best_bytes = smallest_bytes
-            best_quality = smallest_quality
-
-        final_size_mb = len(best_bytes) / (1024 * 1024)
-        if log_progress:
-            logger.info(f"  - 最终质量: {best_quality}, 大小: {final_size_mb:.2f}MB")
-
-        return best_bytes
+                high = quality - 1
+        if best is not None:
+            return best
+        if image.size == (1, 1):
+            raise InvalidImage('图片无法压缩到目标大小。')
+        image = image.resize(tuple(max(1, int(size * 0.75)) for size in image.size), Image.Resampling.LANCZOS)
 
 
-def adaptive_compress_bytes(image_bytes, max_size_mb=1, target_quality=85, log_progress=True):
-    """
-    自适应压缩，确保压缩后的大小不超过限制。
-    动态 GIF 保持 GIF 格式输出，静态图片转为 JPEG 输出。
-    """
-    original_size_mb = len(image_bytes) / (1024 * 1024)
-
-    if original_size_mb <= max_size_mb:
-        return image_bytes
-
-    if log_progress:
-        logger.info(f"图片大小: {original_size_mb:.2f}MB，超过限制 {max_size_mb}MB，开始自适应压缩...")
-
-    image_stream = io.BytesIO(image_bytes)
-    with Image.open(image_stream) as img:
-        fmt = img.format
-        is_animated = getattr(img, 'n_frames', 1) > 1
-
-    if fmt == 'GIF' and is_animated:
-        return _compress_gif_bytes(image_bytes, max_size_mb, log_progress=log_progress)
-
-    return _compress_static_bytes(image_bytes, max_size_mb, target_quality, log_progress=log_progress)
-
-
-def compress_image_from_bytes(image_bytes, log_progress=True):
-    """
-    尽可能将图片压缩到 1MB 以内；极端情况下仍可能超过目标大小。
-    参数: image_bytes - 图片字节流 (bytes类型)；log_progress - 是否输出正常压缩进度
-    返回: 压缩后的图片字节流 (bytes类型)
-    """
-    return adaptive_compress_bytes(
-        image_bytes=image_bytes,
-        max_size_mb=1,
-        target_quality=85,
-        log_progress=log_progress
-    )
+def _animation(data: bytes, max_bytes: int) -> bytes:
+    with _open(data) as source:
+        frame_count = getattr(source, 'n_frames', 1)
+        if frame_count > MAX_FRAMES or frame_count * source.width * source.height > MAX_ANIMATION_PIXELS:
+            raise InvalidImage('动画帧数或总像素过大，请先压缩动画后重试。')
+        frames, durations = [], []
+        loop = source.info.get('loop')
+        for frame in ImageSequence.Iterator(source):
+            frames.append(frame.convert('RGBA').copy())
+            duration = frame.info.get('duration', 100)
+            durations.append(max(10, int(duration or 100)))
+    # 每次真正尝试减小尺寸；跳帧后使用原帧时长之和，避免加速或拖慢动画。
+    scale = min(1.0, 800 / max(frames[0].size))
+    for skip in (1, 2, 4, 8, 16):
+        for shrink in (1.0, 0.65, 0.4, 0.2):
+            size = tuple(max(1, int(side * scale * shrink)) for side in frames[0].size)
+            selected = []
+            for frame in frames[::skip]:
+                rgba = frame.resize(size, Image.Resampling.LANCZOS)
+                palette = rgba.quantize(colors=127, method=Image.Quantize.FASTOCTREE)
+                transparent = rgba.getchannel('A').point(lambda alpha: 255 if alpha < 128 else 0)
+                palette.paste(255, mask=transparent)
+                palette.info['transparency'] = 255
+                selected.append(palette)
+            output = io.BytesIO()
+            kwargs = {'loop': int(loop)} if loop is not None else {}
+            selected[0].save(
+                output, format='GIF', save_all=True, append_images=selected[1:],
+                duration=[sum(durations[i:i + skip]) for i in range(0, len(frames), skip)],
+                optimize=False, transparency=255, disposal=2, **kwargs,
+            )
+            if output.tell() <= max_bytes:
+                return output.getvalue()
+    raise InvalidImage('动画无法压缩到 1MB 以内，请先缩短动画后重试。')
 
 
-def get_image_extension(image_bytes):
-    """根据压缩后的字节内容返回正确的文件扩展名，避免依赖来源 URL 的扩展名"""
-    with Image.open(io.BytesIO(image_bytes)) as img:
-        fmt = img.format
-    extensions = {
-        'JPEG': '.jpg',
-        'PNG': '.png',
-        'GIF': '.gif',
-        'WEBP': '.webp',
-        'BMP': '.bmp',
-        'TIFF': '.tiff',
-    }
-    return extensions.get(fmt, '.jpg')
-
-
-def compress_folder_basic(folder_path, zip_path, include_subfolders=True):
-    """
-    将文件夹压缩成zip文件
-
-    参数:
-    - folder_path: 要压缩的文件夹路径
-    - zip_path: 输出的zip文件路径
-    - include_subfolders: 是否包含子文件夹
-    """
-    folder = Path(folder_path)
-
-    if not folder.exists():
-        print(f"文件夹不存在: {folder_path}")
-        return False
-
-    if not folder.is_dir():
-        print(f"路径不是文件夹: {folder_path}")
-        return False
-
+def process_image(data: bytes, max_bytes: int = MAX_BYTES, target_quality: int = 85) -> ProcessedImage:
+    if not data:
+        raise InvalidImage('图片内容为空。')
+    original_hash = hashlib.sha256(data).hexdigest()
     try:
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            for file_path in folder.rglob("*") if include_subfolders else folder.iterdir():
-                if file_path.is_file():
-                    relative_path = file_path.relative_to(folder)
-                    zipf.write(file_path, relative_path)
-                    print(f"添加文件: {relative_path}")
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            with _open(data) as image:
+                image.verify()
+            with _open(data) as image:
+                image.load()
+                animated = getattr(image, 'n_frames', 1) > 1 and image.format in {'GIF', 'WEBP', 'PNG'}
+                if animated and getattr(image, 'n_frames', 1) > MAX_FRAMES:
+                    raise InvalidImage('动画帧数过多，请缩短动画后重试。')
+                if animated:
+                    if image.n_frames * image.width * image.height > MAX_ANIMATION_PIXELS:
+                        raise InvalidImage('动画总像素过大，请先压缩动画后重试。')
+                    for frame in ImageSequence.Iterator(image):
+                        frame.load()
+            if len(data) > max_bytes:
+                data = _animation(data, max_bytes) if animated else _static(data, max_bytes, target_quality)
+            with _open(data) as image:
+                image.load()
+                extension = FORMATS[image.format]
+                phash = str(imagehash.phash(_rgb(ImageOps.exif_transpose(image))))
+    except InvalidImage:
+        raise
+    except Exception as exc:
+        raise InvalidImage('图片损坏、像素过大或格式无法处理。') from exc
+    return ProcessedImage(data, extension, hashlib.sha256(data).hexdigest(), phash, original_hash)
 
-        print(f"压缩完成: {zip_path}")
-        return True
-    except Exception as e:
-        print(f"压缩失败: {e}")
-        return False
+
+# 保留常用图片工具入口，便于既有调用迁移。
+def compress_image_from_bytes(image_bytes: bytes, log_progress: bool = True) -> bytes:
+    return process_image(image_bytes).data
 
 
-def compute_phash(image_bytes: bytes):
-    """计算图片感知哈希，返回十六进制字符串"""
-    with Image.open(io.BytesIO(image_bytes)) as img:
-        return str(imagehash.phash(img))
+def adaptive_compress_bytes(image_bytes: bytes, max_size_mb: float = 1, target_quality: int = 85) -> bytes:
+    if max_size_mb <= 0:
+        raise ValueError('目标大小必须大于 0。')
+    return process_image(image_bytes, int(max_size_mb * MAX_BYTES), target_quality).data
 
-# 测试
-if __name__ == '__main__':
-    with open('C:\\Users\\hu_pa\\Desktop\\randpic\\lh\\randpic_lh_2.jpg', 'rb') as f:
-        image_bytes = f.read()
 
-    adaptive_compressed_bytes = compress_image_from_bytes(image_bytes)
+def get_image_extension(image_bytes: bytes) -> str:
+    try:
+        with _open(image_bytes) as image:
+            return FORMATS[image.format]
+    except Exception as exc:
+        raise InvalidImage('无法识别图片格式。') from exc
 
-    with open('adaptive_compressed_output.jpg', 'wb') as f:
-        f.write(adaptive_compressed_bytes)
+
+def compute_phash(image_bytes: bytes) -> str:
+    return process_image(image_bytes).phash

@@ -23,70 +23,78 @@ _✨ 一个发送指令就能让你的 bot 发出对应指令的图片的插件 
 
 ## 📖 介绍
 
-这是由 [nonebot-plugin-capoo](https://github.com/HuParry/nonebot-plugin-capoo) 插件衍生而来的随机发送图片的插件，从使用上来看，这个插件远优于 [nonebot-plugin-capoo](https://github.com/HuParry/nonebot-plugin-capoo) 插件。
+一个基于 NoneBot2 / OneBot V11 的群聊图库插件，最初衍生自 [nonebot-plugin-capoo](https://github.com/HuParry/nonebot-plugin-capoo)。
 
-你可以很方便地直接通过在配置文件里设置好触发指令（支持多个触发指令）后，在群聊中发送对应指令，从而使 Bot 随机发送出你所存储的图片。
+- 群员发送图库指令，Bot 随机发送对应分类的图片。
+- 群管理员或群主可以添加图片、引用 Bot 发出的图片发送 `删除`，以及按群启用／禁用指令。
+- 根据每张图片的发送次数加权抽取：权重为 `1 / (send_count + 1)`，发送次数越少，再次选中的概率越大；每张有效图片都有机会被选中。
+- 自动压缩超过 1MiB 的图片，群内添加时使用感知哈希检查相似图片。
+- 本地静态图库无需 OSS；可选同步到阿里云 OSS。增删后自动更新网页，网页分页并使用浏览器原生懒加载。
 
-插件除了能随机发送图片，还能在群聊内直接通过指令存储图片，同时为了避免重复加入同一张图片，该插件添加了图片感知哈希算法，相似的图片无法重复添加。
+### 2.0.0 升级说明
 
-随机发送图片并不是完全随机，而是**发送次数少的图片触发的概率更大**。
+2.0.0 重构了图片存储、数据库、指令和网页同步。原有 `.env` 配置项、指令配置 JSON、图片目录和命名规则继续使用。
 
-该插件的运行逻辑是：
-- 自动在 Bot 所设路径下创建一个 `randpic` 文件夹；
-- 在你预设指令（可以是多个）后，插件会检索指令，并在 `randpic/img` 目录下生成所有你预设命令作为名字的文件夹，同时在 `randpic/database` 目录下生成一个 `data.db` 的数据库文件；
-- 之后你可以通过 Bot 存储图片，也可以直接在 `<预设命令>` 文件夹下存储图片。
+首次启动会将旧版 `Pic_of_<指令>` 表和历史引用关系迁移到统一的图片表，保留能对应到现有图片的发送次数和引用关系。旧表保留，迁移前自动备份数据库到 `database/data.pre-v2.db`。之后启动只核对文件变化，不再清空并重建图片记录。
 
-例如你设置了其中一个触发指令为`capoo`，并且你设置了存储路径为`/data`（若不设置存储路径，则由 [nonebot-plugin-localstore](https://github.com/nonebot/plugin-localstore) 来指定存储路径），你可以自己直接给bot运行的服务器的`/data/randpic/img/capoo/`文件夹上传你想要的图片，并且你在群聊中通过指令让bot存储的图片也会存储在`/data/randpic/img/capoo/`里。
+升级前建议完整备份存储目录。若需要回退 1.x，请恢复完整备份；2.0 不会持续更新旧表，不能直接让旧版读取新运行状态。
 
-你可以在bot未启动期间任意修改图片文件夹内的所有内容，因为在启动bot后插件会自动做图片配置检查，因此你不用担心自己修改图片后会导致数据库与文件夹内容不同步。
+实现说明见 [架构与数据一致性](./docs/architecture.md)。
 
-**由于发送大储存的图片对于服务器来说压力很大，因此，图片大于1MB的将压缩至1MB以内再储存，请有高清图片保存需求的慎用！！！（毕竟发在群里的图片，画质太高也是浪费嘛）**
+### 本地存储和离线加图
 
-Bot 运行期间，请通过插件指令添加或删除图片，避免直接修改服务器上的图片文件。
+`randpic_store_dir_path` 指定的路径就是存储根目录，**不会额外追加一层 `randpic`**。未设置时，由 `nonebot-plugin-localstore` 提供默认目录。
 
-不建议你存储过多图片（指几万张甚至更多），因为没做过存储大量图片的测试。
+例如设置 `randpic_store_dir_path="data/randpic"` 后：
 
+```text
+data/randpic/
+├── randpic_commands.json   # 指令及各群禁用设置
+├── img/
+│   ├── capoo/
+│   │   └── randpic_capoo_0000000001.png
+│   └── 马哥/
+├── database/
+│   ├── data.db            # 图片、发送次数、历史消息、待同步任务
+│   ├── data.pre-v2.db     # 从旧版迁移时生成的原始数据库备份
+│   └── ...                # 文件恢复日志、网页上传缓存等内部文件
+└── public/                # 自动生成的本地静态网页与图片副本，请勿手动维护
+```
 
+Bot 停止时，可以在 `img/<指令>/` 中添加、删除、替换或重命名图片，下次启动会重新核对。新增分类需要先写入 `randpic_commands.json`；仅创建未配置的文件夹不会自动启用新指令。
 
+文件名规则仍为 `randpic_<指令>_<十位编号>.<实际格式后缀>`。规范且主文件名唯一的图片保留原名，其余自动分配新编号。不同后缀共用编号序列，删除后新增也不会复用插件已记录的编号。已有图片仅改名时会尽可能按内容保留其身份和发送次数；同一路径换成不同图片会建立新身份，旧引用不会删除新图。
 
-### 静态网页生成的方案
+支持 JPG、PNG、GIF、WebP、BMP、TIFF，以及没有后缀但实际属于这些格式的文件。损坏或无法处理的图片会记录错误并保留原文件，不会强行删除；非图片文件跳过。离线添加不做相似图去重，以免移除用户主动放入的内容。
 
-图片太多太杂，上服务器查看图片太过麻烦，你是不是想通过网页直接看到目前已经存储了哪些图片？自v1.0.0版本后，本插件可以配置生成静态网页，目前已有两种生成方案。
+**超过 1MiB 的图片会压缩，静态图片可能转为 JPG，动画会尽量保留动画和播放时长。需要原图时请自行保留备份。** 群内下载原图默认限制 32MiB，可配置；离线单文件超过 128MiB、超过 400 帧或超大像素的图片请先自行处理。
 
-#### fastapi生成静态网页
-Bot启动后，会尝试构建静态网页，如果drivers中没有配置fastapi，将无法生效。
+Bot 运行期间请通过指令增删图片，直接修改文件需重启才能重新索引。一个存储目录只能由一个 Bot 进程维护，同一进程内多个 Bot 账号可以共用。
 
-启动完成后，访问 [http://\<hots\>:\<port\>/randpic](http://<hots>:<port>/randpic) 即可查看到内容。
+### 静态网页
 
-#### 阿里云OSS对象存储
+#### FastAPI 本地网页
 
-**适用对象**：1、服务器配置较低的用户：部署一个Bot后，再拉起一个web服务，服务器吃不消；2、服务器没有公网IP的用户：没有公网IP的话，在服务器上拉起web服务，其他人也无法访问（内网还是能访问的）。
+使用 FastAPI 驱动时，Bot 启动后即可通过 `http://<host>:<port>/randpic/` 查看图库，无需配置 OSS。默认每页 100 张图片，可通过 `randpic_web_page_size` 调整。图片使用 `loading="lazy"`，按需加载。
 
-配置阿里云OSS对象存储，如果你自己手里有已备案的域名，可以用来搭建静态网页，方便 自己/群友 点击链接查看图片列表。
+增删图片后本地页面立即重新发布；已打开的网页在可见时每 15 秒检查一次目录版本，发现变化会自动刷新。没有 FastAPI 服务的驱动仍可使用聊天指令和 OSS 同步。
 
-如何配置阿里云OSS对象存储？请自行百度搜索步骤。
+#### 阿里云 OSS
 
-想要在插件里启用阿里云OSS功能，你需要准备好以下数据，便于之后配置到.env文件中：
+配置全部五项 `randpic_endpoint`、`randpic_bucket`、`randpic_region`、`randpic_oss_access_key_id`、`randpic_oss_access_key_secret` 后启用 OSS 同步。缺少任意一项只关闭 OSS，不影响本地图库。
 
-- randpic_endpoint：自定义域名。你的OSS bucket捆绑的哪个域名就填哪个。注意尾部不加`/`；
-- randpic_bucket：阿里云OSS存储空间的名称；
-- randpic_region：bucket所在的地域，例如 `cn-beijing`，各个地域ID可见[OSS地域和访问域名](https://help.aliyun.com/zh/oss/regions-and-endpoints#e583bfe5e6sme)；
-- randpic_oss_access_key_id、randpic_oss_access_key_secret：阿里云用户的AccessKey ID和AccessKey Secret。
+- `randpic_endpoint`：绑定到 Bucket 的完整网页域名，如 `https://gallery.example.com`。
+- `randpic_bucket`：Bucket 名称。
+- `randpic_region`：地域 ID，如 `cn-beijing`，可查阅 [OSS 地域和访问域名](https://help.aliyun.com/zh/oss/regions-and-endpoints)。
+- AccessKey：需要上传和删除本插件对象的权限。
 
-以上的配置项不配齐的话静态网页功能将**不生效**。
-
-bucket的访问权限至少要设置为公共读，否则通过域名也无法访问到图片。为了能网页访问，你需要给bucket配置好你自己的域名。
-
-另外还需要如下图这样设置bucket的静态页面，跟下图一样地配置即可：
+请配置网页访问权限、域名及静态网站首页 `index.html`，示意如下：
 
 ![](./docs/static-page.png)
 
-注意：静态页面要通过 `上传oss` 指令后才会构建页面，但是每次通过 `添加` 指令添加图片时，无需重复发送 `上传oss` 指令，图片会自动上传。构建静态页面的时间可能比较长，因此要尽可能减少构建频率。
+启动、添加和删除后会自动同步；`上传oss` 可手动全量重新发布、重试未完成任务。默认最多 16 个并发请求，终端按节流频率输出独立进度日志，不使用持续占用终端的进度条。
 
-若有不明白的地方可以尝试联系我。
-
-
-
+失败任务存入数据库，后台约每 30 秒重试，重启后继续处理。OSS 的图片、页面和目录版本依次同步，网络故障期间云端可能暂时落后于本地图。`randpic_oss_no_upload_list` 只影响 OSS，本地网页仍显示所有配置的分类；此前已同步的分类被排除后，其受本插件跟踪的云端对象会清理。未被数据库跟踪的历史对象不保证自动清理。
 
 ## 💿 安装
 
@@ -117,11 +125,6 @@ bucket的访问权限至少要设置为公共读，否则通过域名也无法�
 
     poetry add nonebot-plugin-randpic
 </details>
-<details>
-<summary>conda</summary>
-
-    conda install nonebot-plugin-randpic
-</details>
 
 打开 nonebot2 项目根目录下的 `pyproject.toml` 文件, 在 `[tool.nonebot]` 部分追加写入
 
@@ -142,7 +145,11 @@ bucket的访问权限至少要设置为公共读，否则通过域名也无法�
 |        randpic_region         |  否  |                  None                  |                   阿里云OSS对象存储bucket所在地域                    |
 |   randpic_oss_access_key_id   |  否  |                  None                  |                        阿里云用户AccessKey ID                        |
 | randpic_oss_access_key_secret |  否  |                  None                  |                      阿里云用户AccessKey Secret                      |
-|  randpic_oss_no_upload_list   |  否  |                   []                   |     不上传到OSS的指令文件夹列表，该列表中对应的指令均不上传至OSS     |
+|  randpic_oss_no_upload_list   |  否  |                   []                   | 不发布到 OSS 的分类，本地网页仍然可见 |
+| randpic_upload_concurrency | 否 | 16 | OSS 并发数，范围 1–64 |
+| randpic_download_max_mb | 否 | 32 | 群内图片下载大小上限（MiB），范围 1–256 |
+| randpic_download_timeout | 否 | 30 | 下载网络超时秒数，范围大于 0、不超过 300 |
+| randpic_web_page_size | 否 | 100 | 网页每页图片数，范围 1–500 |
 
 在插件的本地存储目录下会有 `randpic_commands.json` 文件，该文件存储了对应指令以及每个指令的分群禁用配置。群里添加新指令、`@bot 禁用<指令>`、`@bot 启用<指令>` 都会修改这个文件，你也可以自己改完后重启 bot。
 
@@ -183,13 +190,13 @@ randpic_oss_no_upload_list=["capoo"]
 | 引用图片后发送 `删除` | 群管／群主 | 否 | 群聊 | 从图库删除被引用图片，并同步网页及 OSS |
 |  `禁用<指令>`  | 群管 |  是  | 群聊 |   在本群禁用该指令，之后该指令在本群将不再触发发图    |
 |  `启用<指令>`  | 群管 |  是  | 群聊 |        恢复本群被禁用的指令         |
-|  `上传oss`   | 群管 |  否  | 群聊 | 若配置了阿里云OSS，则通过该指令生成静态网页上传至OSS |
+|  `上传oss`   | 群管／群主 | 否 | 群聊 | 刷新本地网页；配置 OSS 时全量重新同步并重试待处理任务 |
 
 ### 引用删除图片
 
 群管理员或群主引用本插件发送的图库图片，再发送 `删除` 即可。添加成功时 Bot 回复的图片也支持引用删除。
 
-- 删除会移除原图、数据库记录及网页副本，并在启用 OSS 时删除云端对象、更新页面；影响所有群共用的图库，不会撤回已经发送的 QQ 消息。
+- 删除会移除原图和网页副本，并将数据库中的图片标记为已删除，并在启用 OSS 时删除云端对象、更新页面；影响所有群共用的图库，不会撤回已经发送的 QQ 消息。
 - 消息与图片的对应关系会持久化，重启 Bot 后仍可引用删除。升级前发送、尚未建立对应记录的历史消息无法直接删除，请让 Bot 重新发送对应图片后再操作。
 - 删除过的图片再次引用会提示已删除；若网页或 OSS 同步失败，再次引用原消息发送 `删除` 可重试，`上传oss` 也会重试未完成的删除同步。
 
@@ -219,8 +226,18 @@ randpic_oss_no_upload_list=["capoo"]
 #### `启用马哥` 指令
 <img src="./docs/enable.jpg" width="375"  alt="启用马哥"/>
 
-#### 静态页面网页效果（仅在正确配置OSS情况下生效）
+#### 静态页面网页效果（旧版示意图，2.0 支持本地及 OSS）
 <img src="./docs/web_page.png" width="375"  alt="静态页面网页效果"/>
+
+## 本地开发检查
+
+安装项目依赖后，在仓库根目录运行：
+
+```shell
+python -m unittest discover -s tests -t . -v
+```
+
+检查使用临时目录和模拟的 QQ／OSS 请求，不连接真实群聊或云端。实际部署后仍需结合自己的 OneBot 实现和 OSS 配置确认联通性。
 
 ## TODO
 - [x] 指令触发 bot 发送图片

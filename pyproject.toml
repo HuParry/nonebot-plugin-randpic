@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "nonebot-plugin-randpic"
-version = "2.0.0"
+version = "2.0.1"
 description = "一个通过指令随机发送你存储的图片的nonebot2插件"
 authors = ["HuParry <hu_parry@qq.com>"]
 license = "MIT"
@@ -20,6 +20,7 @@ alibabacloud_oss_v2 = ">=1.2.0"
 aiohttp = ">=3.8.0,<4.0.0"
 pillow = ">=11.0.0"
 imagehash = ">=4.3.0"
+rich = ">=13.0,<15.0"
 
 [build-system]
 requires = ["poetry-core"]

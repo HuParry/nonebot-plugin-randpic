@@ -13,6 +13,7 @@ from .ali_oss import OSSUploaderV2
 from .config import Config
 from .library import ImageLibrary
 from .models import ImageRecord, ImageSnapshot, MutationResult, RandpicError, SyncResult
+from .progress import SyncProgress
 from .utils import run_blocking
 from .web import GalleryPublisher
 
@@ -192,46 +193,51 @@ class RandpicService:
             if not jobs:
                 return SyncResult()
             succeeded = failed = completed = 0
-            last_report = 0.0
+            started = asyncio.get_running_loop().time()
 
-            async def phase(items):
-                queue = asyncio.Queue()
-                for job in items:
-                    queue.put_nowait(job)
+            with SyncProgress(len(jobs)) as progress:
+                async def phase(items):
+                    queue = asyncio.Queue()
+                    for job in items:
+                        queue.put_nowait(job)
 
-                async def worker():
-                    nonlocal succeeded, failed, completed, last_report
-                    while not queue.empty():
-                        job = queue.get_nowait()
-                        try:
-                            if job.action == 'delete':
-                                ok = await self.uploader.delete_file(job.key)
-                            else:
-                                ok = await self.uploader.upload_file(job.local_path, job.key, job.content_hash)
-                            if ok:
-                                await run_blocking(self.repository.complete_job, job)
-                                succeeded += 1
-                            else:
-                                await run_blocking(self.repository.fail_job, job, '远端请求失败或任务已过期')
+                    async def worker():
+                        nonlocal succeeded, failed, completed
+                        while not queue.empty():
+                            job = queue.get_nowait()
+                            try:
+                                if job.action == 'delete':
+                                    ok = await self.uploader.delete_file(job.key)
+                                else:
+                                    ok = await self.uploader.upload_file(job.local_path, job.key, job.content_hash)
+                                if ok:
+                                    await run_blocking(self.repository.complete_job, job)
+                                    succeeded += 1
+                                else:
+                                    await run_blocking(self.repository.fail_job, job, '远端请求失败或任务已过期')
+                                    failed += 1
+                            except Exception as exc:
+                                logger.error(f'同步 OSS 任务失败，已保留以便重试：{job.key} ({exc})')
                                 failed += 1
-                        except Exception as exc:
-                            logger.error(f'同步 OSS 任务失败，已保留以便重试：{job.key} ({exc})')
-                            failed += 1
-                        finally:
-                            queue.task_done()
-                            completed += 1
-                            now = asyncio.get_running_loop().time()
-                            if now - last_report >= 1 or completed == len(jobs):
-                                logger.info(f'OSS同步进度: {completed}/{len(jobs)} ({completed * 100 / len(jobs):.1f}%)，成功 {succeeded}，失败 {failed}')
-                                last_report = now
+                            finally:
+                                queue.task_done()
+                                completed += 1
+                                progress.update(completed, succeeded, failed)
 
-                await asyncio.gather(*(worker() for _ in range(min(self.config.randpic_upload_concurrency, len(items)))))
+                    await asyncio.gather(*(worker() for _ in range(min(self.config.randpic_upload_concurrency, len(items)))))
 
-            # 先同步图片，再同步页面，最后更新用于浏览器自动刷新的目录版本。
-            await phase([job for job in jobs if not job.key.endswith(('.html', '.json'))])
-            await phase([job for job in jobs if job.key.endswith('.html')])
-            await phase([job for job in jobs if job.key.endswith('.json')])
+                # 先同步图片，再同步页面，最后更新用于浏览器自动刷新的目录版本。
+                await phase([job for job in jobs if not job.key.endswith(('.html', '.json'))])
+                await phase([job for job in jobs if job.key.endswith('.html')])
+                await phase([job for job in jobs if job.key.endswith('.json')])
             pending = len(await run_blocking(self.repository.sync_jobs))
+            elapsed = asyncio.get_running_loop().time() - started
+            summary = (f'OSS 同步完成：成功 {succeeded}，失败 {failed}，待处理 {pending}，'
+                       f'用时 {elapsed:.1f} 秒')
+            if failed:
+                logger.warning(summary + '；失败任务将自动重试')
+            else:
+                logger.info(summary)
             return SyncResult(succeeded=succeeded, failed=failed, pending=pending)
 
     async def _retry_worker(self) -> None:

@@ -93,6 +93,31 @@ class OSSUploaderV2:
             except Exception as e:
                 logger.warning(f"关闭 OSS 客户端失败: {e}")
 
+    async def delete_file(self, oss_key: str) -> bool:
+        """删除单个对象；对象不存在也视为已完成删除。"""
+        client = oss_aio.AsyncClient(self.cfg)
+        try:
+            result = await client.delete_object(
+                oss.DeleteObjectRequest(bucket=self.bucket_name, key=oss_key)
+            )
+            if not 200 <= result.status_code < 300:
+                logger.error(f"OSS 删除失败: {oss_key} (状态码: {result.status_code})")
+                return False
+            return True
+        except oss.exceptions.ServiceError as e:
+            if e.code == 'NoSuchKey':
+                return True
+            logger.error(f"OSS 删除失败: {oss_key} ({e})")
+            return False
+        except Exception as e:
+            logger.error(f"OSS 删除失败: {oss_key} ({e})")
+            return False
+        finally:
+            try:
+                await client.close()
+            except Exception as e:
+                logger.warning(f"关闭 OSS 客户端失败: {e}")
+
     async def upload_folder(
             self,
             local_folder_path: str,

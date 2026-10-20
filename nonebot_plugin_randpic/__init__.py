@@ -1,4 +1,5 @@
 import time
+import asyncio
 import os
 from pathlib import Path
 from httpx import AsyncClient
@@ -24,6 +25,7 @@ from . import config as _config
 from .ali_oss import *
 from .compress import compress_image_from_bytes, get_image_extension, compute_phash
 from .web import StaticImageGalleryGenerator
+from .image_store import DeletedImage, ImageDeletionError, SentImageStore
 
 __plugin_meta__ = PluginMetadata(
     name="随机发送图片",
@@ -126,6 +128,9 @@ def _normalize_image_names(command_dir: Path, command: str) -> List[Path]:
 
 
 connection: aiosqlite.Connection
+sent_image_store: SentImageStore
+_image_lock = asyncio.Lock()
+_gallery_lock = asyncio.Lock()
 
 # 激活驱动器
 driver = get_driver()
@@ -150,16 +155,17 @@ async def connect():
     if not randpic_database_path.exists():
         randpic_database_path.mkdir(parents=True, exist_ok=True)
     connection = await aiosqlite.connect(randpic_database_path / "data.db")
+    global sent_image_store
+    sent_image_store = SentImageStore(randpic_database_path / "data.db", randpic_img_path)
+    await sent_image_store.initialize()
 
 async def _is_folder_changed(command: str, folder_path: Path) -> bool:
-    cursor = await connection.cursor()
-    await cursor.execute(
-        "SELECT folder_mtime FROM folder_snapshot WHERE command = ?",
-        (command,)
-    )
-    row = await cursor.fetchone()
+    async with connection.execute(
+        "SELECT folder_mtime FROM folder_snapshot WHERE command = ?", (command,)
+    ) as cursor:
+        row = await cursor.fetchone()
     if row is None:
-        return True  # 新命令，无记录
+        return True
     return folder_path.stat().st_mtime != float(row[0])
 
 async def _save_snapshot(command: str, folder_path: Path):
@@ -275,50 +281,172 @@ async def pic(event: GroupMessageEvent):
     if event.group_id in randpic_banner_group:
         return
     global connection
-    cursor = await connection.cursor()
     command = str(event.get_message()).strip()
-    await cursor.execute(f'''
-        WITH weighted AS (
-            SELECT
-                id,
-                img_url,
-                SUM(1.0 / (send_count + 1)) OVER (
-                    ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                ) AS cumulative_weight
-            FROM Pic_of_{command}
-        ),
-        ticket AS (
-            SELECT
-                abs(random()) / 9223372036854775808.0
-                * MAX(cumulative_weight) AS value
-            FROM weighted
-        )
-        SELECT weighted.id, weighted.img_url
-        FROM weighted CROSS JOIN ticket
-        WHERE weighted.cumulative_weight >= ticket.value
-        ORDER BY weighted.id
-        LIMIT 1
-    ''')
-    data = await cursor.fetchone()
-    if data is None:
-        await picture.finish('当前还没有图片!')
-    image_id, file_name = data
-    img = randpic_img_path / file_name
     try:
-        await picture.send(MessageSegment.image(img))
+        async with _image_lock:
+            cursor = await connection.cursor()
+            await cursor.execute(f'''
+                WITH weighted AS (
+                    SELECT
+                        id,
+                        img_url,
+                        SUM(1.0 / (send_count + 1)) OVER (
+                            ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) AS cumulative_weight
+                    FROM Pic_of_{command}
+                ),
+                ticket AS (
+                    SELECT
+                        abs(random()) / 9223372036854775808.0
+                        * MAX(cumulative_weight) AS value
+                    FROM weighted
+                )
+                SELECT weighted.id, weighted.img_url
+                FROM weighted CROSS JOIN ticket
+                WHERE weighted.cumulative_weight >= ticket.value
+                ORDER BY weighted.id
+                LIMIT 1
+            ''')
+            data = await cursor.fetchone()
+            await cursor.close()
+            if data is None:
+                await picture.send('当前还没有图片!')
+                return
+            image_id, file_name = data
+            img = randpic_img_path / file_name
+            image_bytes = img.read_bytes()
+        result = await picture.send(MessageSegment.image(image_bytes))
     except Exception as e:
-        logger.info(e)
+        logger.warning(f'图片发送失败：{e}')
         await picture.send(f'{command}出不来了，稍后再试试吧~')
         return
+    await _remember_image_message(
+        event, result, command, image_id, file_name, hashlib.sha256(image_bytes).hexdigest()
+    )
 
+
+async def _remember_image_message(
+    event: GroupMessageEvent, result: Any, command: str, image_id: int,
+    img_url: str, content_hash: str, *, count_send: bool = True,
+) -> None:
+    message_id = None
     try:
-        await cursor.execute(
-            f'UPDATE Pic_of_{command} SET send_count = send_count + 1 WHERE id = ?',
-            (image_id,)
-        )
-        await connection.commit()
+        message_id = int(result['message_id'])
+    except (KeyError, TypeError, ValueError):
+        logger.warning('发图接口未返回有效的 message_id，这条消息将无法引用删除。')
+    try:
+        async with _image_lock:
+            await sent_image_store.record_sent(
+                str(event.self_id), event.group_id, message_id, command,
+                image_id, img_url, content_hash, count_send=count_send,
+            )
     except Exception as e:
-        logger.warning(f"图片已发送，但更新发送次数失败（分类：{command}，图片ID：{image_id}）：{e}")
+        logger.warning(f'图片已发送，但保存消息对应关系或发送次数失败：{e}')
+
+
+def _reply_message_id(event: GroupMessageEvent) -> Optional[int]:
+    if event.reply is not None:
+        return event.reply.message_id
+    # get_msg 不可用时，仍可利用原始引用 ID 查询本插件自己的发图记录。
+    for segment in event.original_message:
+        if segment.type == 'reply':
+            try:
+                return int(segment.data['id'])
+            except (KeyError, TypeError, ValueError):
+                return None
+    return None
+
+
+async def _is_delete_request(event: GroupMessageEvent) -> bool:
+    if _reply_message_id(event) is None:
+        return False
+    message = event.get_message()
+    if message.extract_plain_text().strip() != '删除':
+        return False
+    return all(
+        segment.type in {'text', 'reply'}
+        or (segment.type == 'at' and str(segment.data.get('qq')) == str(event.self_id))
+        for segment in message
+    )
+
+
+async def _sync_deleted_image(image: DeletedImage) -> List[str]:
+    """调用方持有图库及网页锁，避免并发上传重新发布已删除的图片。"""
+    if await sent_image_store.has_current_image(image):
+        # 同名位置已有新图时，旧消息的同步重试不得删除新图。
+        await sent_image_store.mark_synced(image)
+        return []
+    errors = []
+    pages_ready = False
+    try:
+        StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').remove_command_image(
+            image.command, Path(image.img_url).name, randpic_oss_no_upload_list
+        )
+        pages_ready = True
+    except Exception as e:
+        logger.warning(f'图片已删除，但刷新本地网页失败：{image.img_url} ({e})')
+        errors.append('本地网页更新失败')
+    if isOss:
+        try:
+            uploader = OSSUploaderV2()
+            if not await uploader.delete_file(image.img_url):
+                errors.append('OSS 图片删除失败')
+            if pages_ready:
+                page_keys = ['index.html']
+                if image.command not in randpic_oss_no_upload_list:
+                    page_keys.append(f'{image.command}/index.html')
+                results = [
+                    await uploader.upload_file(str(randpic_path / 'public' / key), key)
+                    for key in page_keys
+                ]
+                if not all(results):
+                    errors.append('OSS 页面更新失败')
+        except Exception as e:
+            logger.warning(f'图片已删除，但 OSS 同步失败：{image.img_url} ({e})')
+            errors.append('OSS 同步失败')
+    if not errors:
+        try:
+            await sent_image_store.mark_synced(image)
+        except Exception as e:
+            logger.warning(f'保存图片删除同步状态失败：{image.img_url} ({e})')
+            errors.append('同步状态保存失败')
+    return errors
+
+
+delete_picture = on_message(
+    rule=Rule(_is_delete_request), permission=GROUP_ADMIN | GROUP_OWNER,
+    priority=1, block=True,
+)
+
+
+@delete_picture.handle()
+async def handle_delete_picture(event: GroupMessageEvent) -> None:
+    if event.reply is not None:
+        sender_id = event.reply.sender.user_id
+        if sender_id is not None and str(sender_id) != str(event.self_id):
+            await delete_picture.finish('请引用本 Bot 发送的图库图片，再发送“删除”。', at_sender=True)
+    async with _gallery_lock:
+        async with _image_lock:
+            try:
+                image = await sent_image_store.delete(
+                    str(event.self_id), event.group_id, _reply_message_id(event)
+                )
+            except ImageDeletionError as e:
+                await delete_picture.finish(str(e), at_sender=True)
+            except Exception as e:
+                logger.exception(f'删除图库图片失败：{e}')
+                await delete_picture.finish('删除失败，请稍后重试或查看 Bot 日志。', at_sender=True)
+            errors = []
+            if image.sync_pending:
+                try:
+                    errors = await _sync_deleted_image(image)
+                except Exception as e:
+                    logger.exception(f'图片已删除，但同步失败：{e}')
+                    errors.append('网页或 OSS 同步失败')
+    message = '这张图片已经从图库删除。' if image.already_deleted else f'已从「{image.command}」图库删除这张图片。'
+    if errors:
+        message += '\n' + '；'.join(errors) + '，可再次引用原消息发送“删除”重试。'
+    await delete_picture.finish(message, at_sender=True)
 
 
 add = on_regex(r"^添加(.+)$", permission=GROUP_ADMIN | GROUP_OWNER, priority=2, block=True)
@@ -326,27 +454,28 @@ add = on_regex(r"^添加(.+)$", permission=GROUP_ADMIN | GROUP_OWNER, priority=2
 
 async def _ensure_new_command(command: str) -> bool:
     """为新指令建文件夹、建表，并加入运行时配置 + 写回 JSON。"""
-    global connection
-    path = randpic_img_path / command
-    path.mkdir(parents=True, exist_ok=True)
-    cursor = await connection.cursor()
-    await cursor.execute(
-        f'''CREATE TABLE IF NOT EXISTS Pic_of_{command} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            img_url TEXT NOT NULL,
-            phash TEXT NOT NULL,
-            send_count INTEGER NOT NULL DEFAULT 0
-        )'''
-    )
-    await connection.commit()
-    current_commands_config.setdefault(command, set())
-    persisted = _persist_commands()
-    logger.info(f"已动态创建新指令分类：{command}")
-    return persisted
+    async with _image_lock:
+        global connection
+        path = randpic_img_path / command
+        path.mkdir(parents=True, exist_ok=True)
+        cursor = await connection.cursor()
+        await cursor.execute(
+            f'''CREATE TABLE IF NOT EXISTS Pic_of_{command} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                img_url TEXT NOT NULL,
+                phash TEXT NOT NULL,
+                send_count INTEGER NOT NULL DEFAULT 0
+            )'''
+        )
+        await connection.commit()
+        current_commands_config.setdefault(command, set())
+        persisted = _persist_commands()
+        logger.info(f"已动态创建新指令分类：{command}")
+        return persisted
 
 
 @add.got("pic", prompt="请发送图片！")
-async def add_pic(matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = Arg('pic')):
+async def add_pic(event: GroupMessageEvent, matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = Arg('pic')):
     global connection, persisted
     command = matched[0].strip()
 
@@ -365,8 +494,6 @@ async def add_pic(matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = A
         if not persisted:
             msg += f"\n⚠️ {_config.COMMANDS_FILENAME} 写入失败，本次新增指令仅当前会话有效；请检查文件权限或修复 JSON。"
         await add.send(msg)
-
-    cursor = await connection.cursor()
 
     for pic_name in pic_list:
         if pic_name.type != 'image':
@@ -410,76 +537,85 @@ async def add_pic(matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = A
             await add.send(pic_name + MessageSegment.text('\n图片格式无法处理，请换一张图片重试'))
             continue
 
-        await cursor.execute(f'SELECT phash FROM Pic_of_{command}')
-        SIMILARITY_THRESHOLD = 5  # 汉明距离 ≤5 认为相似
-        is_duplicate = False
-        while True:
-            row = await cursor.fetchone()
-            if row is None:
-                break
-            ex_phash_str = row[0]
-            try:
-                ex_phash = imagehash.hex_to_hash(ex_phash_str)
-            except (TypeError, ValueError) as e:
-                logger.warning(f"忽略损坏的图片感知哈希记录：{ex_phash_str!r} ({e})")
+        async with _image_lock:
+            async with connection.execute(f'SELECT phash FROM Pic_of_{command}') as hash_cursor:
+                SIMILARITY_THRESHOLD = 5  # 汉明距离 ≤5 认为相似
+                is_duplicate = False
+                while True:
+                    row = await hash_cursor.fetchone()
+                    if row is None:
+                        break
+                    ex_phash_str = row[0]
+                    try:
+                        ex_phash = imagehash.hex_to_hash(ex_phash_str)
+                    except (TypeError, ValueError) as e:
+                        logger.warning(f"忽略损坏的图片感知哈希记录：{ex_phash_str!r} ({e})")
+                        continue
+                    if (new_phash - ex_phash) <= SIMILARITY_THRESHOLD:
+                        is_duplicate = True
+                        break
+            if is_duplicate:
+                await add.send(pic_name + Message('\n这张已经有相似图，不能重复添加！'), at_sender=True)
                 continue
-            if (new_phash - ex_phash) <= SIMILARITY_THRESHOLD:
-                is_duplicate = True
-                break
-        if is_duplicate:
-            await add.send(pic_name + Message('\n这张已经有相似图，不能重复添加！'), at_sender=True)
-            continue
 
-        command_dir = randpic_img_path / command
-        file_path = None
-        file_created = False
-        try:
-            # 编号扫描与文件创建之间没有 await，避免并发消息分配相同编号。
-            index = _next_image_index(command_dir, command)
-            while True:
-                file_name = (randpic_filename.format(command=command, index=str(index).zfill(10))
-                             + image_extension)
-                file_path = command_dir / file_name
-                try:
-                    with file_path.open("xb") as f:
-                        file_created = True
-                        f.write(data)
-                    break
-                except FileExistsError:
-                    index += 1
-            await cursor.execute('insert into Pic_of_{command}(img_url, phash) values (?, ?)'.format(command=command),
-                                 (f"{command}/{file_name}", new_phash_str))
-            await connection.commit()
-        except Exception as e:
-            logger.warning(f"图片入库失败 {file_path}: {e}")
-            await connection.rollback()
-            if file_created:
-                try:
-                    file_path.unlink()
-                except OSError:
-                    logger.warning(f"无法清理未入库图片文件：{file_path}")
-            await add.send(pic_name + Message("\n导入失败！"), at_sender=True)
-            continue
+            command_dir = randpic_img_path / command
+            file_path = None
+            file_created = False
+            try:
+                # 编号扫描与文件创建之间没有 await，避免并发消息分配相同编号。
+                index = _next_image_index(command_dir, command)
+                while True:
+                    file_name = (randpic_filename.format(command=command, index=str(index).zfill(10))
+                                 + image_extension)
+                    file_path = command_dir / file_name
+                    try:
+                        with file_path.open("xb") as f:
+                            file_created = True
+                            f.write(data)
+                        break
+                    except FileExistsError:
+                        index += 1
+                async with connection.execute(
+                    f'INSERT INTO Pic_of_{command}(img_url, phash) VALUES (?, ?)',
+                    (f"{command}/{file_name}", new_phash_str),
+                ) as insert_cursor:
+                    saved_image_id = insert_cursor.lastrowid
+                await _save_snapshot(command, command_dir)
+            except Exception as e:
+                logger.warning(f"图片入库失败 {file_path}: {e}")
+                await connection.rollback()
+                if file_created:
+                    try:
+                        file_path.unlink()
+                    except OSError:
+                        logger.warning(f"无法清理未入库图片文件：{file_path}")
+                await add.send(pic_name + Message("\n导入失败！"), at_sender=True)
+                continue
 
         msg = "\n导入成功！"
         if isOss and command not in randpic_oss_no_upload_list:
             msg += f'可去 {endpoint}/{parse.quote(command)}/ 查看'
             try:
-                StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(
-                    command, file_name, randpic_oss_no_upload_list
-                )
-                uploader = OSSUploaderV2()
-                uploaded = [
-                    await uploader.upload_file(str(randpic_path / 'public' / command / 'index.html'), f'{command}/index.html'),
-                    await uploader.upload_file(str(randpic_path / 'public' / 'index.html'), 'index.html'),
-                    await uploader.upload_file(str(file_path), f'{command}/{file_name}'),
-                ]
-                if not all(uploaded):
-                    msg += '\n但 OSS 上传未全部成功，请稍后重试“上传oss”。'
+                async with _gallery_lock:
+                    StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_command_html(
+                        command, file_name, randpic_oss_no_upload_list
+                    )
+                    uploader = OSSUploaderV2()
+                    uploaded = [
+                        await uploader.upload_file(str(randpic_path / 'public' / command / 'index.html'), f'{command}/index.html'),
+                        await uploader.upload_file(str(randpic_path / 'public' / 'index.html'), 'index.html'),
+                        await uploader.upload_file(str(file_path), f'{command}/{file_name}'),
+                    ]
+                    if not all(uploaded):
+                        msg += '\n但 OSS 上传未全部成功，请稍后重试“上传oss”。'
             except Exception as e:
                 logger.warning(f"图片已保存，但更新 OSS 页面失败：{e}")
                 msg += '\n但 OSS 页面更新失败，请稍后重试“上传oss”。'
-        await add.send(pic_name + Message(msg), at_sender=True)
+        result = await add.send(pic_name + Message(msg), at_sender=True)
+        await _remember_image_message(
+            event, result, command, saved_image_id, f"{command}/{file_name}",
+            hashlib.sha256(data).hexdigest(), count_send=False,
+        )
 
     await add.finish()
 
@@ -491,18 +627,25 @@ async def handle_oss(event: GroupMessageEvent) -> None:
     await OSS.send('正在上传至OSS...')
     start_time = time.perf_counter()
     try:
-        StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site(
-            randpic_oss_no_upload_list
-        )
-        succeeded, failed = await OSSUploaderV2().upload_folder(str(randpic_path / 'public'))
+        async with _gallery_lock:
+            failed_deletions = 0
+            async with _image_lock:
+                for image in await sent_image_store.pending_deletions():
+                    if await _sync_deleted_image(image):
+                        failed_deletions += 1
+            StaticImageGalleryGenerator(randpic_img_path, randpic_path / 'public').generate_static_site(
+                randpic_oss_no_upload_list
+            )
+            succeeded, failed = await OSSUploaderV2().upload_folder(str(randpic_path / 'public'))
     except Exception as e:
         logger.exception(f"生成或上传 OSS 静态页面失败：{e}")
         await OSS.finish('上传失败，请查看 Bot 日志。')
     elapsed_time = time.perf_counter() - start_time
-    if failed:
-        await OSS.finish(
-            f'上传结束，用时: {elapsed_time:.2f}秒，成功 {succeeded} 个，失败 {failed} 个。'
-        )
+    if failed or failed_deletions:
+        message = f'上传结束，用时: {elapsed_time:.2f}秒，成功 {succeeded} 个，失败 {failed} 个。'
+        if failed_deletions:
+            message += f'另有 {failed_deletions} 张图片的删除同步未完成，请重试。'
+        await OSS.finish(message)
     await OSS.finish(f'上传完成，用时: {elapsed_time:.2f}秒，地址：{endpoint}/')
 
 

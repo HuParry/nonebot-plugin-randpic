@@ -202,6 +202,26 @@ class StaticImageGalleryGenerator:
                     # 复制文件（可以改为硬链接以节省空间）
                     shutil.copy2(source_file, target_file)
 
+    def remove_command_image(self, folder_key: str, file_name: str, no_upload_oss_list):
+        """移除网页中的图片副本，并刷新分类页和首页，兼容删除分类最后一张图。"""
+        self.output_folder.mkdir(parents=True, exist_ok=True)
+        folder_dir = self.output_folder / folder_key
+        (folder_dir / file_name).unlink(missing_ok=True)
+        all_folders = self.get_all_images_with_folders(no_upload_oss_list)
+        if folder_key in no_upload_oss_list:
+            (folder_dir / 'index.html').unlink(missing_ok=True)
+        else:
+            folder_dir.mkdir(parents=True, exist_ok=True)
+            folder_info = all_folders.get(folder_key, {
+                'path': folder_key, 'images': [], 'image_count': 0, 'subfolders': [],
+            })
+            (folder_dir / 'index.html').write_text(
+                self.generate_folder_html(folder_info, folder_key), encoding='utf-8'
+            )
+        (self.output_folder / 'index.html').write_text(
+            self.generate_index_html(all_folders), encoding='utf-8'
+        )
+
     def generate_command_html(self, folder_key: str, file_name: str, no_upload_oss_list):
         if folder_key in no_upload_oss_list:
             return

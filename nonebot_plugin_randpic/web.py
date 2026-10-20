@@ -1,7 +1,6 @@
-"""静态网页发布：原子替换文件、分页、懒加载，以及增删后的自动刷新。"""
+"""静态网页发布：原子替换文件、分页与图片懒加载。"""
 
 import hashlib
-import json
 import math
 from html import escape
 from pathlib import Path
@@ -67,8 +66,7 @@ def _url(image: ImageRecord) -> str:
     return quote(image.filename, safe='') + '?v=' + image.content_hash[:16]
 
 
-def _shell(title: str, home: str, version: str, command: str, page: int, content: str) -> str:
-    state = json.dumps({'version': version, 'command': command, 'page': page}, ensure_ascii=False).replace('<', '\\u003c')
+def _shell(title: str, home: str, content: str) -> str:
     return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f5f6f2">
 <title>{escape(title)} · Randpic</title><style>{GALLERY_STYLE}
@@ -77,22 +75,13 @@ def _shell(title: str, home: str, version: str, command: str, page: int, content
 </style></head><body><div class="shell">
 <nav class="topbar"><a class="brand" href="{home}"><span class="brand-mark">✳</span><span>RANDPIC / 图片收藏馆</span></a><span class="top-note">捕捉喜欢的瞬间</span></nav>
 {content}<footer>Randpic · 收藏每一个喜欢的瞬间</footer></div>
-<script>(()=>{{const state={state}; const home={json.dumps(home)};
-setInterval(async()=>{{if(document.hidden)return;try{{
-const response=await fetch(home+'catalog.json',{{cache:'no-store'}});if(!response.ok)return;
-const next=await response.json();if(next.version===state.version)return;
-if(state.command && (!(state.command in next.pages)||state.page>next.pages[state.command])){{location.href=state.command in next.pages?'./':home;return;}}
-location.reload();}}catch(error){{}}}},15000);}})();</script></body></html>'''
+</body></html>'''
 
 
 def render_catalog(groups: Mapping[str, Sequence[ImageRecord]], page_size: int) -> Dict[str, bytes]:
-    """相同图库总是产生相同 HTML；发送次数变化不会导致网页重复刷新。"""
-    identity = [(command, [(image.id, image.filename, image.content_hash) for image in images])
-                for command, images in sorted(groups.items())]
-    version = hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+    """生成纯静态 HTML，只让内容实际变化的页面产生同步任务。"""
     pages = {command: max(1, math.ceil(len(images) / page_size)) for command, images in groups.items()}
-    catalog = json.dumps({'version': version, 'pages': pages}, ensure_ascii=False, sort_keys=True).encode()
-    files = {'catalog.json': catalog}
+    files: Dict[str, bytes] = {}
     total = sum(len(images) for images in groups.values())
     cards = []
     for command, images in sorted(groups.items()):
@@ -106,7 +95,7 @@ def render_catalog(groups: Mapping[str, Sequence[ImageRecord]], page_size: int) 
     home = f'''<header class="hero"><p class="eyebrow">YOUR IMAGE LIBRARY</p><h1>每一张，都值得<br>被好好收藏。</h1>
 <p class="hero-copy">在这里慢慢翻看收藏的每一份灵感。</p></header><div class="section-head"><h2>全部分类</h2>
 <span class="count">{len(groups)} 个分类　·　{total} 张图片</span></div><main class="folder-grid">{''.join(cards)}</main>'''
-    files['index.html'] = _shell('图片收藏馆', './', version, '', 1, home).encode()
+    files['index.html'] = _shell('图片收藏馆', './', home).encode()
     for command, images in groups.items():
         for page in range(1, pages[command] + 1):
             cards = []
@@ -128,7 +117,7 @@ def render_catalog(groups: Mapping[str, Sequence[ImageRecord]], page_size: int) 
 <header class="gallery-title"><p class="eyebrow">COLLECTION</p><h1>{escape(command)}</h1><p class="hero-copy">本分类共收藏 {len(images)} 张图片。</p></header>
 <main class="image-grid">{''.join(cards)}</main><nav class="pagination">{''.join(navigation)}</nav>'''
             filename = 'index.html' if page == 1 else f'page-{page}.html'
-            files[f'{command}/{filename}'] = _shell(command, '../', version, command, page, content).encode()
+            files[f'{command}/{filename}'] = _shell(command, '../', content).encode()
     return files
 
 

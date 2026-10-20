@@ -226,10 +226,9 @@ class RandpicService:
 
                     await asyncio.gather(*(worker() for _ in range(min(self.config.randpic_upload_concurrency, len(items)))))
 
-                # 先同步图片，再同步页面，最后更新用于浏览器自动刷新的目录版本。
-                await phase([job for job in jobs if not job.key.endswith(('.html', '.json'))])
+                # 先同步图片，再同步页面。
+                await phase([job for job in jobs if not job.key.endswith('.html')])
                 await phase([job for job in jobs if job.key.endswith('.html')])
-                await phase([job for job in jobs if job.key.endswith('.json')])
             pending = len(await run_blocking(self.repository.sync_jobs))
             elapsed = asyncio.get_running_loop().time() - started
             summary = (f'OSS 同步完成：成功 {succeeded}，失败 {failed}，待处理 {pending}，'

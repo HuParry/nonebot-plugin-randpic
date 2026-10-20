@@ -44,7 +44,7 @@ class OSSUploaderV2:
             result = await asyncio.wait_for(self.client.put_object(oss.PutObjectRequest(
                 bucket=self.bucket, key=oss_key, body=data,
                 content_type=mimetypes.guess_type(oss_key)[0] or 'application/octet-stream',
-                cache_control='no-cache' if oss_key.endswith(('.html', '.json')) else 'public, max-age=31536000, immutable',
+                cache_control='no-cache' if oss_key.endswith('.html') else 'public, max-age=31536000, immutable',
             )), timeout=60)
             if 200 <= result.status_code < 300:
                 return True

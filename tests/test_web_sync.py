@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,21 +30,21 @@ class WebSyncTests(ServiceTest):
             self.assertEqual((await client.get('/randpic/' + image.key)).status_code, 404)
             self.assertIn('暂时还没有图片', (await client.get('/randpic/马哥/')).text)
 
-    async def test_pagination_is_pruned_after_deletion_and_version_ignores_counts(self):
+    async def test_pagination_is_pruned_after_deletion_and_html_ignores_counts(self):
         self.service.publisher.page_size = 2
         images = [await self.add_picture(seed) for seed in range(1, 6)]
         public = self.root / 'public'
         self.assertTrue((public / 'capoo/page-3.html').exists())
-        before = (public / 'catalog.json').read_bytes()
+        before = (public / 'capoo/index.html').read_bytes()
         await self.record(images[0], count_send=True)
         await self.service.sync()
-        self.assertEqual((public / 'catalog.json').read_bytes(), before)
+        self.assertEqual((public / 'capoo/index.html').read_bytes(), before)
         for n, image in enumerate(images[2:]):
             await self.record(image, 100 + n)
             await self.service.delete('90001', 100, 100 + n)
         self.assertFalse((public / 'capoo/page-2.html').exists())
         self.assertFalse((public / 'capoo/page-3.html').exists())
-        self.assertEqual(json.loads((public / 'catalog.json').read_bytes())['pages']['capoo'], 1)
+        self.assertIn('第 1 / 1 页', (public / 'capoo/index.html').read_text())
 
     async def test_oss_exclusions_do_not_hide_local_gallery(self):
         self.service.uploader = cloud = FakeCloud()
@@ -57,7 +56,7 @@ class WebSyncTests(ServiceTest):
         self.assertTrue((self.root / 'public' / image.key).exists())
         self.assertNotIn(image.key, cloud.objects)
         self.assertIn(visible.key, cloud.objects)
-        self.assertNotIn('capoo', json.loads(cloud.objects['catalog.json'])['pages'])
+        self.assertNotIn('capoo/index.html', cloud.objects)
 
     async def test_failed_cloud_jobs_survive_restart_and_delete_retries(self):
         self.service.uploader = cloud = FakeCloud()

@@ -65,6 +65,21 @@ def _persist_commands() -> bool:
 
 randpic_filename: str = 'randpic_{command}_{index}'
 
+
+def _next_image_index(command_dir: Path, command: str) -> int:
+    """忽略后缀，使用现有最大图片编号加一；扫描时只保留最大值。"""
+    prefix = randpic_filename.format(command=command, index='')
+    max_index = 0
+    with os.scandir(command_dir) as entries:
+        for entry in entries:
+            stem = Path(entry.name).stem
+            if not stem.startswith(prefix):
+                continue
+            number = stem[len(prefix):]
+            if number.isascii() and number.isdigit():
+                max_index = max(max_index, int(number))
+    return max_index + 1
+
 connection: aiosqlite.Connection
 
 # 激活驱动器
@@ -417,14 +432,18 @@ async def add_pic(matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = A
             continue
 
         command_dir = randpic_img_path / command
-        index = 1
+        file_path = None
+        file_created = False
         try:
+            # 编号扫描与文件创建之间没有 await，避免并发消息分配相同编号。
+            index = _next_image_index(command_dir, command)
             while True:
                 file_name = (randpic_filename.format(command=command, index=str(index).zfill(10))
                              + image_extension)
                 file_path = command_dir / file_name
                 try:
                     with file_path.open("xb") as f:
+                        file_created = True
                         f.write(data)
                     break
                 except FileExistsError:
@@ -435,10 +454,11 @@ async def add_pic(matched: Tuple[Any, ...] = RegexGroup(), pic_list: Message = A
         except Exception as e:
             logger.warning(f"图片入库失败 {file_path}: {e}")
             await connection.rollback()
-            try:
-                file_path.unlink()
-            except OSError:
-                logger.warning(f"无法清理未入库图片文件：{file_path}")
+            if file_created:
+                try:
+                    file_path.unlink()
+                except OSError:
+                    logger.warning(f"无法清理未入库图片文件：{file_path}")
             await add.send(pic_name + Message("\n导入失败！"), at_sender=True)
             continue
 

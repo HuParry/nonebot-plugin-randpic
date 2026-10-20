@@ -136,26 +136,3 @@ def process_image(data: bytes, max_bytes: int = MAX_BYTES, target_quality: int =
     except Exception as exc:
         raise InvalidImage('图片损坏、像素过大或格式无法处理。') from exc
     return ProcessedImage(data, extension, hashlib.sha256(data).hexdigest(), phash, original_hash)
-
-
-# 保留常用图片工具入口，便于既有调用迁移。
-def compress_image_from_bytes(image_bytes: bytes, log_progress: bool = True) -> bytes:
-    return process_image(image_bytes).data
-
-
-def adaptive_compress_bytes(image_bytes: bytes, max_size_mb: float = 1, target_quality: int = 85) -> bytes:
-    if max_size_mb <= 0:
-        raise ValueError('目标大小必须大于 0。')
-    return process_image(image_bytes, int(max_size_mb * MAX_BYTES), target_quality).data
-
-
-def get_image_extension(image_bytes: bytes) -> str:
-    try:
-        with _open(image_bytes) as image:
-            return FORMATS[image.format]
-    except Exception as exc:
-        raise InvalidImage('无法识别图片格式。') from exc
-
-
-def compute_phash(image_bytes: bytes) -> str:
-    return process_image(image_bytes).phash

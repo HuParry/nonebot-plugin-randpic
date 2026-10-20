@@ -1,11 +1,9 @@
 """图库业务：启动整理、添加、引用删除、发送快照，均在工作线程中执行。"""
 
 import hashlib
-import re
 import sqlite3
 import uuid
 from collections import defaultdict
-from contextlib import closing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -36,7 +34,7 @@ class ImageLibrary:
     def __init__(self, root: Path):
         self.root = root.resolve()
         self.image_root = self.root / 'img'
-        self.repository = Repository(self.root / 'database' / 'data.db', self.image_root)
+        self.repository = Repository(self.root / 'database' / 'data.db')
         self.settings = CommandSettings(self.root)
         self.journal = FileJournal(self.root, self.repository)
         self.store_lock = StoreLock(self.root / 'database' / 'randpic.lock')
@@ -48,7 +46,6 @@ class ImageLibrary:
             directory.mkdir(parents=True, exist_ok=True)
         self.store_lock.acquire()
         try:
-            self._recover_v1_staging()
             self.repository.initialize()
             self.journal.initialize()
             self.journal.recover()
@@ -60,30 +57,6 @@ class ImageLibrary:
 
     def close(self) -> None:
         self.store_lock.release()
-
-    def _recover_v1_staging(self) -> None:
-        if not self.repository.path.exists():
-            return
-        with closing(sqlite3.connect(self.repository.path)) as db:
-            if not db.execute("SELECT 1 FROM sqlite_master WHERE name = 'randpic_sent_images'").fetchone():
-                return
-            for staged in self.image_root.glob('*/.randpic-delete-*.tmp'):
-                match = re.fullmatch(r'\.randpic-delete-(.+)\.[0-9a-f]{32}\.tmp', staged.name)
-                if match is None:
-                    continue
-                try:
-                    key = f'{staged.parent.name}/{match[1]}'
-                    original = safe_path(self.image_root, key)
-                    row = db.execute('SELECT MIN(deleted) FROM randpic_sent_images WHERE img_url = ? AND content_hash = ?',
-                                     (key, digest_file(staged))).fetchone()
-                    if row[0] == 1:
-                        staged.unlink()
-                    elif not original.exists():
-                        staged.rename(original)
-                    else:
-                        raise RandpicError('恢复位置已存在')
-                except Exception as exc:
-                    logger.error(f'恢复旧版图片备份失败，已保留文件：{staged} ({exc})')
 
     def _candidates(self, command: str, existing: List[ImageRecord]) -> List[_Candidate]:
         directory = safe_path(self.image_root, f'{command}/placeholder').parent

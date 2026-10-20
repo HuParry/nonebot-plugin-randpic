@@ -108,16 +108,3 @@ class ResilienceTests(ServiceTest):
             self.assertFalse(await uploader.delete_file(image.key))
             await uploader.close()
             client.close.assert_awaited_once()
-
-    async def test_startup_backup_failure_leaves_old_database_unchanged(self):
-        from tests.test_migration import MigrationTests
-        root, _ = await MigrationTests.legacy(self)
-        from nonebot_plugin_randpic.repository import Repository
-        repository = Repository(root / 'database/data.db', root / 'img')
-        original = repository.path.read_bytes()
-        with patch.object(Path, 'replace', side_effect=PermissionError('backup cannot be finalized')):
-            with self.assertRaises(PermissionError):
-                repository.initialize()
-        self.assertEqual(repository.path.read_bytes(), original)
-        self.assertFalse((root / 'database/data.pre-v2.db').exists())
-        self.assertEqual(list((root / 'database').glob('*.tmp')), [])

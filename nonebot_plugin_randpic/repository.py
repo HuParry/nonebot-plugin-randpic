@@ -1,17 +1,12 @@
 """SQLite 存储。连接只在线程内使用，事务不跨聊天请求或网络请求。"""
 
 import sqlite3
-import time
-import uuid
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import fields
 from pathlib import Path
-from typing import Dict, Iterator, List, Mapping, Optional, Tuple
-
-from nonebot.log import logger
+from typing import Iterator, List, Mapping, Optional, Tuple
 
 from .models import ImageRecord, RandpicError, SyncJob
-from .utils import digest_file, parse_index, safe_path, valid_command
 
 
 IMAGE_COLUMNS = ', '.join(field.name for field in fields(ImageRecord))
@@ -57,8 +52,8 @@ def _hamming(left: str, right: str) -> int:
 
 
 class Repository:
-    def __init__(self, path: Path, image_root: Path):
-        self.path, self.image_root = path, image_root
+    def __init__(self, path: Path):
+        self.path = path
 
     @contextmanager
     def connection(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
@@ -98,92 +93,14 @@ class Repository:
             version = int(self.meta(db, 'schema_version')) if 'randpic_meta' in names else 0
             if version > 2:
                 raise RandpicError('数据库来自更新版本的 Randpic，不能用 2.0.0 覆盖。')
-            legacy = any(name.startswith('Pic_of_') for name in names) or 'randpic_sent_images' in names
-            backup = self.path.with_name(self.path.stem + '.pre-v2.db')
-            if not version and legacy and not backup.exists():
-                temporary = backup.with_name(backup.name + '.' + uuid.uuid4().hex + '.tmp')
-                try:
-                    with closing(sqlite3.connect(temporary)) as destination:
-                        db.backup(destination)
-                    temporary.replace(backup)
-                finally:
-                    if temporary.exists():
-                        temporary.unlink()
             db.execute('PRAGMA journal_mode = WAL')
             db.execute('PRAGMA synchronous = FULL')
             db.executescript(SCHEMA)
         with self.connection(write=True) as db:
             if int(self.meta(db, 'schema_version')) == 0:
-                self._migrate_legacy(db, names)
                 self.set_meta(db, 'schema_version', '2')
                 self.set_meta(db, 'published_revision', '-1')
                 self.mark_dirty(db)
-
-    def _migrate_legacy(self, db: sqlite3.Connection, names: set) -> None:
-        current: Dict[Tuple[str, str], ImageRecord] = {}
-        for name in sorted(names):
-            if not name.startswith('Pic_of_') or not valid_command(name[7:]):
-                continue
-            command = name[7:]
-            self.set_sequence(db, command, 0)
-            columns = {row[1] for row in db.execute(f'PRAGMA table_info("{name}")')}
-            if 'img_url' not in columns:
-                continue
-            for row in db.execute(f'SELECT * FROM "{name}"'):
-                key = str(row['img_url']).replace('\\', '/')
-                try:
-                    path = safe_path(self.image_root, key)
-                    if key.split('/')[0] != command:
-                        raise RandpicError('分类与图片路径不一致')
-                    self.set_sequence(db, command, parse_index(path.stem, command) or 0)
-                    exists = path.is_file()
-                    content_hash = digest_file(path) if exists else ''
-                    stat = path.stat() if exists else None
-                    count = max(0, int(row['send_count'] or 0)) if 'send_count' in columns else 0
-                except (OSError, ValueError, RandpicError) as exc:
-                    logger.warning(f'迁移旧图片记录失败，保留原表：{key} ({exc})')
-                    continue
-                previous = current.get((command, path.name))
-                if previous is not None:
-                    db.execute('UPDATE randpic_images SET send_count = send_count + ? WHERE id = ?', (count, previous.id))
-                    continue
-                image = ImageRecord(
-                    uuid.uuid4().hex, command, path.name, content_hash,
-                    str(row['phash'] or '') if 'phash' in columns else '', count,
-                    stat.st_size if stat else 0, stat.st_mtime_ns if stat else 0, not exists, False,
-                )
-                self.upsert_image(db, image)
-                current[(command, path.name)] = image
-                db.execute('INSERT OR IGNORE INTO randpic_remote VALUES (?, ?)', (key, ''))
-            db.execute('INSERT OR IGNORE INTO randpic_remote VALUES (?, ?)', (f'{command}/index.html', ''))
-        if current:
-            db.execute('INSERT OR IGNORE INTO randpic_remote VALUES (?, ?)', ('index.html', ''))
-        if 'randpic_sent_images' not in names:
-            return
-        historical: Dict[Tuple[str, str, str], str] = {}
-        for row in db.execute('SELECT * FROM randpic_sent_images'):
-            try:
-                command, key, content_hash = str(row['command']), str(row['img_url']).replace('\\', '/'), str(row['content_hash'])
-                path = safe_path(self.image_root, key)
-                if path.parent.name != command:
-                    raise RandpicError('分类与图片路径不一致')
-                self.set_sequence(db, command, parse_index(path.stem, command) or 0)
-                image = current.get((command, path.name))
-                if row['deleted'] or image is None or image.deleted or image.content_hash != content_hash:
-                    identity = (command, path.name, content_hash)
-                    image_id = historical.get(identity)
-                    if image_id is None:
-                        image_id = uuid.uuid4().hex
-                        historical[identity] = image_id
-                        self.upsert_image(db, ImageRecord(image_id, command, path.name, content_hash, '', deleted=True, validated=False))
-                    if row['sync_pending']:
-                        db.execute('INSERT OR IGNORE INTO randpic_remote VALUES (?, ?)', (key, ''))
-                else:
-                    image_id = image.id
-                db.execute('INSERT OR REPLACE INTO randpic_messages VALUES (?, ?, ?, ?)',
-                           (str(row['bot_id']), int(row['group_id']), int(row['message_id']), image_id))
-            except (KeyError, IndexError, ValueError, RandpicError) as exc:
-                logger.warning(f'迁移历史发图消息失败，保留原记录：{exc}')
 
     @staticmethod
     def upsert_image(db: sqlite3.Connection, image: ImageRecord) -> None:

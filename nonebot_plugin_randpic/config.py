@@ -1,4 +1,4 @@
-"""插件设置与向后兼容的指令配置文件。"""
+"""插件设置与指令配置文件。"""
 
 import json
 from pathlib import Path
@@ -34,7 +34,7 @@ class Config(BaseModel):
 
 
 class CommandSettings:
-    """保留旧版 list[str] 和 dict[str, list[int]] 格式；损坏的文件绝不覆盖。"""
+    """读取 dict[str, list[int]] 格式的指令设置；损坏的文件绝不覆盖。"""
 
     def __init__(self, root: Path):
         self.path = root / 'randpic_commands.json'
@@ -48,12 +48,9 @@ class CommandSettings:
             return
         try:
             data = json.loads(self.path.read_text(encoding='utf-8'))
-            if isinstance(data, list):
-                entries = [(name, []) for name in data]
-            elif isinstance(data, dict):
-                entries = list(data.items())
-            else:
-                raise ValueError('顶层必须是对象或旧版指令数组')
+            if not isinstance(data, dict):
+                raise ValueError('顶层必须是对象：指令名对应禁用群号列表')
+            entries = list(data.items())
         except (OSError, ValueError) as exc:
             self.writable = False
             self.commands = {}
@@ -71,8 +68,6 @@ class CommandSettings:
             valid_groups = frozenset(g for g in groups if type(g) is int and g > 0)
             commands[name] = commands.get(name, frozenset()) | valid_groups
         self.commands = commands
-        if isinstance(data, list):
-            self.save()
 
     def save(self) -> bool:
         if not self.writable:

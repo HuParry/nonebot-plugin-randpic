@@ -6,7 +6,7 @@ import imagehash
 import io
 
 
-def _compress_gif_bytes(image_bytes, max_size_mb=1):
+def _compress_gif_bytes(image_bytes, max_size_mb=1, log_progress=True):
     """压缩动态GIF，保留动画效果。按帧跳过 → 缩放 → 减色的顺序逐步加大压缩力度。"""
     image_stream = io.BytesIO(image_bytes)
     img = Image.open(image_stream)
@@ -54,10 +54,11 @@ def _compress_gif_bytes(image_bytes, max_size_mb=1):
                     best_bytes = result
 
                 if result_mb <= max_size_mb:
-                    logger.info(
-                        f"GIF压缩完成: 帧跳过={frame_skip}, 缩放={scale:.2f}, "
-                        f"颜色={n_colors}, 大小={result_mb:.2f}MB"
-                    )
+                    if log_progress:
+                        logger.info(
+                            f"GIF压缩完成: 帧跳过={frame_skip}, 缩放={scale:.2f}, "
+                            f"颜色={n_colors}, 大小={result_mb:.2f}MB"
+                        )
                     return result
 
     logger.warning(
@@ -67,7 +68,7 @@ def _compress_gif_bytes(image_bytes, max_size_mb=1):
     return best_bytes
 
 
-def _compress_static_bytes(image_bytes, max_size_mb=1, target_quality=85):
+def _compress_static_bytes(image_bytes, max_size_mb=1, target_quality=85, log_progress=True):
     """压缩静态图片（JPEG/PNG 等），转为 JPEG 输出。"""
     image_stream = io.BytesIO(image_bytes)
     with Image.open(image_stream) as img:
@@ -77,7 +78,8 @@ def _compress_static_bytes(image_bytes, max_size_mb=1, target_quality=85):
             scale = 1920 / max(img.size)
             new_size = tuple(int(dim * scale) for dim in img.size)
             img = img.resize(new_size, Image.Resampling.LANCZOS)
-            logger.info(f"  - 调整尺寸: {original_size} -> {img.size}")
+            if log_progress:
+                logger.info(f"  - 调整尺寸: {original_size} -> {img.size}")
 
         if 'A' in img.getbands() or 'transparency' in img.info:
             rgba = img.convert('RGBA')
@@ -119,12 +121,13 @@ def _compress_static_bytes(image_bytes, max_size_mb=1, target_quality=85):
             best_quality = smallest_quality
 
         final_size_mb = len(best_bytes) / (1024 * 1024)
-        logger.info(f"  - 最终质量: {best_quality}, 大小: {final_size_mb:.2f}MB")
+        if log_progress:
+            logger.info(f"  - 最终质量: {best_quality}, 大小: {final_size_mb:.2f}MB")
 
         return best_bytes
 
 
-def adaptive_compress_bytes(image_bytes, max_size_mb=1, target_quality=85):
+def adaptive_compress_bytes(image_bytes, max_size_mb=1, target_quality=85, log_progress=True):
     """
     自适应压缩，确保压缩后的大小不超过限制。
     动态 GIF 保持 GIF 格式输出，静态图片转为 JPEG 输出。
@@ -134,7 +137,8 @@ def adaptive_compress_bytes(image_bytes, max_size_mb=1, target_quality=85):
     if original_size_mb <= max_size_mb:
         return image_bytes
 
-    logger.info(f"图片大小: {original_size_mb:.2f}MB，超过限制 {max_size_mb}MB，开始自适应压缩...")
+    if log_progress:
+        logger.info(f"图片大小: {original_size_mb:.2f}MB，超过限制 {max_size_mb}MB，开始自适应压缩...")
 
     image_stream = io.BytesIO(image_bytes)
     with Image.open(image_stream) as img:
@@ -142,21 +146,22 @@ def adaptive_compress_bytes(image_bytes, max_size_mb=1, target_quality=85):
         is_animated = getattr(img, 'n_frames', 1) > 1
 
     if fmt == 'GIF' and is_animated:
-        return _compress_gif_bytes(image_bytes, max_size_mb)
+        return _compress_gif_bytes(image_bytes, max_size_mb, log_progress=log_progress)
 
-    return _compress_static_bytes(image_bytes, max_size_mb, target_quality)
+    return _compress_static_bytes(image_bytes, max_size_mb, target_quality, log_progress=log_progress)
 
 
-def compress_image_from_bytes(image_bytes):
+def compress_image_from_bytes(image_bytes, log_progress=True):
     """
     尽可能将图片压缩到 1MB 以内；极端情况下仍可能超过目标大小。
-    参数: image_bytes - 图片字节流 (bytes类型)
+    参数: image_bytes - 图片字节流 (bytes类型)；log_progress - 是否输出正常压缩进度
     返回: 压缩后的图片字节流 (bytes类型)
     """
     return adaptive_compress_bytes(
         image_bytes=image_bytes,
         max_size_mb=1,
-        target_quality=85
+        target_quality=85,
+        log_progress=log_progress
     )
 
 

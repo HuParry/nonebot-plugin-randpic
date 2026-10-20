@@ -1,10 +1,9 @@
 import time
-import uuid
 import os
 from pathlib import Path
 from httpx import AsyncClient
 import ssl
-from typing import Any, Dict, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from nonebot.adapters.onebot.v11 import MessageSegment, Message, GroupMessageEvent
 from nonebot.adapters.onebot.v11 import GROUP, GROUP_ADMIN, GROUP_OWNER
 from nonebot.plugin import on_command, on_message, on_regex, on_fullmatch
@@ -66,19 +65,65 @@ def _persist_commands() -> bool:
 randpic_filename: str = 'randpic_{command}_{index}'
 
 
+def _parse_image_index(stem: str, command: str) -> Optional[int]:
+    """读取本分类文件名中的数字编号，不要求补齐前导零。"""
+    prefix = randpic_filename.format(command=command, index='')
+    if not stem.startswith(prefix):
+        return None
+    number = stem[len(prefix):]
+    if number.isascii() and number.isdigit():
+        return int(number)
+    return None
+
+
 def _next_image_index(command_dir: Path, command: str) -> int:
     """忽略后缀，使用现有最大图片编号加一；扫描时只保留最大值。"""
-    prefix = randpic_filename.format(command=command, index='')
     max_index = 0
     with os.scandir(command_dir) as entries:
         for entry in entries:
-            stem = Path(entry.name).stem
-            if not stem.startswith(prefix):
-                continue
-            number = stem[len(prefix):]
-            if number.isascii() and number.isdigit():
-                max_index = max(max_index, int(number))
+            index = _parse_image_index(Path(entry.name).stem, command)
+            if index is not None:
+                max_index = max(max_index, index)
     return max_index + 1
+
+
+def _normalize_image_names(command_dir: Path, command: str) -> List[Path]:
+    """保留规范且主文件名唯一的图片，只重命名其余图片；重复执行不改名。"""
+    supported_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tif', '.tiff'}
+    next_index = _next_image_index(command_dir, command)
+    used_stems: Set[str] = set()
+    image_paths: List[Path] = []
+    for image_path in sorted(command_dir.iterdir()):
+        if not image_path.is_file():
+            continue
+        extension = image_path.suffix
+        if extension and extension.lower() not in supported_extensions:
+            continue
+        if not extension:
+            try:
+                extension = get_image_extension(image_path.read_bytes())
+            except Exception as e:
+                logger.warning(f"无法识别无扩展名文件 {image_path}，跳过：{e}")
+                continue
+
+        stem = image_path.stem
+        index = _parse_image_index(stem, command)
+        is_standard = (
+            bool(image_path.suffix)
+            and index is not None
+            and index > 0
+            and stem == randpic_filename.format(command=command, index=str(index).zfill(10))
+        )
+        if not is_standard or stem in used_stems:
+            # 从现有最大编号之后分配，避免目标文件与原有文件冲突。
+            new_stem = randpic_filename.format(command=command, index=str(next_index).zfill(10))
+            next_index += 1
+            target = command_dir / (new_stem + extension)
+            image_path = image_path.rename(target)
+        used_stems.add(image_path.stem)
+        image_paths.append(image_path)
+    return image_paths
+
 
 connection: aiosqlite.Connection
 
@@ -88,10 +133,8 @@ driver = get_driver()
 
 @driver.on_startup
 async def _():
-    logger.info("正在检查文件...")
     await connect()
     await create_dir()
-    logger.info("文件检查完成，欢迎使用！")
 
 
 @driver.on_shutdown
@@ -131,13 +174,11 @@ async def _save_snapshot(command: str, folder_path: Path):
 # 创建所需文件夹和数据库
 async def create_dir():
     command_list = sorted(current_commands_config)
-    supported_image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tif', '.tiff'}
 
     # 先创建文件夹
     for command in command_list:
         path = randpic_img_path / command
         if not path.exists():
-            logger.warning('未找到{path}文件夹，准备创建{path}文件夹...'.format(path=path))
             path.mkdir(parents=True, exist_ok=True)
 
     cursor = await connection.cursor()
@@ -157,6 +198,8 @@ async def create_dir():
         has_send_count = "send_count" in columns
         if not folder_changed and has_send_count:
             continue
+        path = randpic_img_path / command
+        image_paths = _normalize_image_names(path, command)
         await cursor.execute(f'DROP TABLE IF EXISTS {table_name}')
         await cursor.execute('''
             CREATE TABLE IF NOT EXISTS Pic_of_{command} (
@@ -168,58 +211,14 @@ async def create_dir():
             '''.format(command=command))
         await connection.commit()
 
-    # 读取所有文件夹文件，调整文件夹内图片，并写入数据库
-        global randpic_filename
-        path: Path = randpic_img_path / command
-        randpic_file_list = []
-        for filename in sorted(os.listdir(path)):
-            image_path = path / filename
-            extension = image_path.suffix.lower()
-            if not image_path.is_file():
-                logger.warning(f"跳过非文件路径：{image_path}")
-                continue
-            if extension and extension not in supported_image_extensions:
-                logger.warning(f"跳过不支持的图片格式：{image_path}")
-                continue
-            randpic_file_list.append(filename)
-
-        # 文件名哈希化
-        def get_uuid(command: str):
-            return uuid.uuid5(uuid.uuid4(), command).hex
-        hash_str = get_uuid(command)
-        for i in range(len(randpic_file_list)):
-            filename = randpic_file_list[i]
-            filename_without_extension, filename_extension = os.path.splitext(filename)
-            format_str = randpic_filename.format( command=command, index=str(i + 1).zfill(10) )
-            if not filename_extension:
-                try:
-                    with (path / filename).open('rb') as f:
-                        data = f.read()
-                    filename_extension = get_image_extension(data)
-                except Exception as e:
-                    logger.warning(f"无法识别无扩展名文件 {path / filename}，跳过：{e}")
-                    continue
-            hash_new_filename =  f"{format_str}_{hash_str}{filename_extension}"
-            os.rename(path / filename, path / hash_new_filename)
-
-        # 将哈希化的文件名订正为规范名
-        randpic_file_list = sorted(os.listdir(path))
-        for i in range(len(randpic_file_list)):
-            hash_filename = randpic_file_list[i]
-            if f"_{hash_str}" not in hash_filename:
-                continue
-            new_filename = hash_filename.replace(f"_{hash_str}", '')
-            os.rename(path / hash_filename, path / new_filename)
-
-        # 将图片信息写入数据库
-        randpic_file_list = sorted(os.listdir(path))
-        for i in range(len(randpic_file_list)):
-            filename = randpic_file_list[i]
+        # 只索引本次检查通过的图片，不再重新遍历无关文件。
+        for image_path in image_paths:
+            filename = image_path.name
 
             try:
                 with (path / filename).open('rb') as f:
                     data = f.read()
-                data = compress_image_from_bytes(data)
+                data = compress_image_from_bytes(data, log_progress=False)
                 with (path / filename).open('wb') as f:
                     f.write(data)
 

@@ -49,8 +49,8 @@ def safe_path(root: Path, key: str) -> Path:
     return path
 
 
-def digest_file(path: Path) -> str:
-    digest = hashlib.sha256()
+def digest_file(path: Path, algorithm: str = 'sha256') -> str:
+    digest = hashlib.new(algorithm, usedforsecurity=False)
     with path.open('rb') as file:
         for block in iter(lambda: file.read(128 * 1024), b''):
             digest.update(block)

@@ -61,7 +61,7 @@ class LibraryTests(ServiceTest):
         images = self.service.repository.list_images()
         self.assertEqual(len(images), 4)
         self.assertEqual(len({Path(image.filename).stem for image in images}), 4)
-        self.assertTrue(all(image.validated for image in images))
+        self.assertTrue(all(len(image.phash) == 16 for image in images))
         retained = next(image for image in images if image.content_hash == first.content_hash)
         self.assertEqual((retained.id, retained.send_count), (first.id, 1))
         await self.service.delete('90001', 100, 11)
@@ -159,7 +159,7 @@ class LibraryTests(ServiceTest):
     async def test_delete_failure_restores_original_and_reference(self):
         image = await self.add_picture()
         await self.record(image)
-        with patch.object(self.service.repository, 'mark_dirty', side_effect=sqlite3.IntegrityError('failure')):
+        with patch.object(self.service.repository, 'mark_deleted', side_effect=sqlite3.IntegrityError('failure')):
             with self.assertRaises(sqlite3.IntegrityError):
                 await self.service.delete('90001', 100, 11)
         self.assertEqual((self.root / 'img' / image.key).read_bytes(), picture())

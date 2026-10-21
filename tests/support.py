@@ -100,6 +100,16 @@ class FakeCloud:
     async def close(self):
         pass
 
+    async def list_files(self):
+        from nonebot_plugin_randpic.ali_oss import is_gallery_key
+        from nonebot_plugin_randpic.models import RemoteObject
+        self.calls.append(('list', ''))
+        return {key: RemoteObject(len(data), hashlib.md5(data, usedforsecurity=False).hexdigest())
+                for key, data in self.objects.items() if is_gallery_key(key)}
+
+    async def matches_file(self, key, file, remote):
+        return remote.size == file.size and remote.etag == file.etag
+
     async def upload_file(self, path, key, expected_hash=None):
         self.calls.append(('upload', key))
         if self.fail:

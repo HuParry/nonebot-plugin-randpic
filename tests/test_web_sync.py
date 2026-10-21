@@ -58,7 +58,7 @@ class WebSyncTests(ServiceTest):
         self.assertIn(visible.key, cloud.objects)
         self.assertNotIn('capoo/index.html', cloud.objects)
 
-    async def test_failed_cloud_jobs_survive_restart_and_delete_retries(self):
+    async def test_cloud_differences_are_rediscovered_after_restart_and_delete_failure(self):
         self.service.uploader = cloud = FakeCloud()
         cloud.fail = True
         image = await self.add_picture()
@@ -89,7 +89,7 @@ class WebSyncTests(ServiceTest):
         self.assertIsNone((await self.service.sync()).web_error)
         self.assertTrue((self.root / 'public' / result.image.key).exists())
 
-    async def test_old_inflight_upload_cannot_erase_new_delete_job_or_block_mutation(self):
+    async def test_inflight_upload_is_deleted_on_next_comparison_without_blocking_mutation(self):
         started, release = asyncio.Event(), asyncio.Event()
         class SlowCloud(FakeCloud):
             async def upload_file(inner, path, key, expected_hash=None):
@@ -111,7 +111,7 @@ class WebSyncTests(ServiceTest):
         finally:
             release.set()
         await task
-        self.assertTrue(any(job.key == image.key and job.action == 'delete' for job in self.service.repository.sync_jobs()))
+        self.assertTrue(self.service._remote_dirty)
         self.assertEqual((await self.service.sync()).pending, 0)
         self.assertNotIn(image.key, cloud.objects)
 

@@ -4,10 +4,10 @@ import hashlib
 import math
 from html import escape
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Mapping, Sequence, Set
 from urllib.parse import quote
 
-from .models import ImageRecord, RandpicError
+from .models import ImageRecord, PublishedFile, RandpicError
 from .utils import atomic_write, digest_file, parse_index, safe_path
 
 GALLERY_STYLE = '''
@@ -129,6 +129,7 @@ class GalleryPublisher:
         self.remote_directory = root / 'database' / 'oss_pages'
         self.page_size = page_size
         self._asset_hashes: Dict[str, str] = {}
+        self._asset_md5: Dict[str, str] = {}
 
     @staticmethod
     def _write_pages(directory: Path, pages: Mapping[str, bytes]) -> None:
@@ -152,8 +153,8 @@ class GalleryPublisher:
                 except OSError:
                     pass
 
-    def publish(self, images: Sequence[ImageRecord], commands: Iterable[str], excluded: Set[str]) -> Dict[str, Tuple[str, str]]:
-        for directory in (self.local_directory, self.remote_directory):
+    def publish(self, images: Sequence[ImageRecord], commands: Iterable[str], excluded: Set[str], *, remote_enabled: bool = False) -> Dict[str, PublishedFile]:
+        for directory in ((self.local_directory, self.remote_directory) if remote_enabled else (self.local_directory,)):
             if directory.is_symlink():
                 raise RandpicError('网页输出目录不能是符号链接。')
             directory.mkdir(parents=True, exist_ok=True)
@@ -164,6 +165,8 @@ class GalleryPublisher:
         for command in groups:
             groups[command].sort(key=lambda image: (parse_index(Path(image.filename).stem, command) or 0, image.filename))
         assets: Dict[str, str] = {}
+        checksums: Dict[str, str] = {}
+        files: Dict[str, PublishedFile] = {}
         for group in groups.values():
             for image in group:
                 path = safe_path(self.local_directory, image.key)
@@ -175,16 +178,26 @@ class GalleryPublisher:
                             raise RandpicError(f'图片文件在运行时被修改：{image.key}')
                         atomic_write(path, data)
                 assets[image.key] = image.content_hash
+                if remote_enabled and image.command not in excluded:
+                    checksum = self._asset_md5.get(image.key) if known else None
+                    if checksum is None:
+                        checksum = digest_file(path, 'md5')
+                    checksums[image.key] = checksum
+                    files[image.key] = PublishedFile(str(path), image.content_hash, checksum, image.byte_size)
         local_pages = render_catalog(groups, self.page_size)
         self._write_pages(self.local_directory, local_pages)
         self._prune(self.local_directory, set(local_pages) | set(assets))
+        self._asset_hashes, self._asset_md5 = assets, checksums
+        if not remote_enabled:
+            return {}
         remote_groups = {command: group for command, group in groups.items() if command not in excluded}
         remote_pages = render_catalog(remote_groups, self.page_size)
         self._write_pages(self.remote_directory, remote_pages)
         self._prune(self.remote_directory, set(remote_pages))
-        self._asset_hashes = assets
-        manifest = {key: (str(self.remote_directory / key), hashlib.sha256(data).hexdigest())
-                    for key, data in remote_pages.items()}
-        manifest.update({image.key: (str(self.local_directory / image.key), image.content_hash)
+        manifest = {key: PublishedFile(
+            str(self.remote_directory / key), hashlib.sha256(data).hexdigest(),
+            hashlib.md5(data, usedforsecurity=False).hexdigest(), len(data),
+        ) for key, data in remote_pages.items()}
+        manifest.update({image.key: files[image.key]
                          for group in remote_groups.values() for image in group})
         return manifest

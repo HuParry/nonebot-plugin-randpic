@@ -27,11 +27,11 @@ class ResilienceTests(ServiceTest):
             self.assertTrue(cloud.calls)
             cloud.fail = False
             for _ in range(100):
-                if image.key in cloud.objects and not self.service.repository.sync_jobs():
+                if image.key in cloud.objects and not self.service._remote_dirty:
                     break
                 await asyncio.sleep(.01)
             self.assertIn(image.key, cloud.objects)
-            self.assertEqual(self.service.repository.sync_jobs(), [])
+            self.assertFalse(self.service._remote_dirty)
             await self.service.close()
             self.assertIsNone(self.service._worker)
 

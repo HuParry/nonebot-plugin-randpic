@@ -38,6 +38,7 @@ class ImageLibrary:
         self.settings = CommandSettings(self.root)
         self.journal = FileJournal(self.root, self.repository)
         self.store_lock = StoreLock(self.root / 'database' / 'randpic.lock')
+        self.revision = 0
 
     def start(self) -> None:
         for directory in (self.root, self.image_root, self.root / 'database'):
@@ -61,7 +62,7 @@ class ImageLibrary:
     def _candidates(self, command: str, existing: List[ImageRecord]) -> List[_Candidate]:
         directory = safe_path(self.image_root, f'{command}/placeholder').parent
         directory.mkdir(parents=True, exist_ok=True)
-        cached = {image.content_hash: image for image in existing if image.validated}
+        cached = {image.content_hash: image for image in existing}
         candidates = []
         for source in sorted(directory.iterdir()):
             if source.is_symlink() or not source.is_file() or source.name.startswith('.randpic-'):
@@ -161,15 +162,15 @@ class ImageLibrary:
                             self.journal.write(image, candidate.source, candidate.payload)
                         destination = self.image_root / image.key
                         stat = destination.stat()
-                        image = replace(image, byte_size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+                        image = replace(image, byte_size=stat.st_size)
                         self.repository.upsert_image(db, image)
                         records.append(image)
                     self.repository.set_sequence(db, command, maximum)
                     old_state = {(i.id, i.filename, i.content_hash) for i in existing}
                     new_state = {(i.id, i.filename, i.content_hash) for i in records}
                     changed = changed or old_state != new_state
-                if changed:
-                    self.repository.mark_dirty(db)
+            if changed:
+                self.revision += 1
         finally:
             # 事务已经提交时清理备份，事务失败时还原文件。
             self.journal.recover()
@@ -197,12 +198,12 @@ class ImageLibrary:
                 payload = self.journal.stage(processed.data)
                 self.journal.write(image, None, payload)
                 stat = (directory / image.filename).stat()
-                image = replace(image, byte_size=stat.st_size, mtime_ns=stat.st_mtime_ns)
+                image = replace(image, byte_size=stat.st_size)
                 self.repository.upsert_image(db, image)
                 self.repository.set_sequence(db, command, index)
-                self.repository.mark_dirty(db)
         finally:
             self.journal.recover()
+        self.revision += 1
         saved = self.settings.add(command)
         return MutationResult(image, settings_saved=saved)
 
@@ -216,11 +217,11 @@ class ImageLibrary:
                 if path.exists() and (not path.is_file() or digest_file(path) != image.content_hash):
                     raise RandpicError('这条消息对应的文件已被替换，未执行删除。请重新发送当前图片后再操作。')
                 self.journal.delete(image)
-                db.execute('UPDATE randpic_images SET deleted = 1 WHERE id = ?', (image.id,))
-                self.repository.mark_dirty(db)
+                self.repository.mark_deleted(db, image.id)
                 result = MutationResult(replace(image, deleted=True))
         finally:
             self.journal.recover()
+        self.revision += 1
         return result
 
     def pick(self, command: str) -> Optional[ImageSnapshot]:
@@ -237,6 +238,6 @@ class ImageLibrary:
             except FileNotFoundError:
                 # 清理在运行中意外消失的文件，并继续挑选其他图片。
                 with self.repository.connection(write=True) as db:
-                    db.execute('UPDATE randpic_images SET deleted = 1 WHERE id = ?', (image.id,))
-                    self.repository.mark_dirty(db)
+                    self.repository.mark_deleted(db, image.id)
+                self.revision += 1
                 logger.warning(f'图片文件已丢失，已从图库索引移除：{path}')

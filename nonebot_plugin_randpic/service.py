@@ -1,9 +1,9 @@
-"""异步应用服务：业务串行提交，网页及时发布，远端任务独立重试。"""
+"""异步应用服务：业务串行提交，网页及时发布，按远端实际状态同步。"""
 
 import asyncio
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
 import httpx
@@ -12,7 +12,7 @@ from nonebot.log import logger
 from .ali_oss import OSSUploaderV2
 from .config import Config
 from .library import ImageLibrary
-from .models import ImageRecord, ImageSnapshot, MutationResult, RandpicError, SyncResult
+from .models import ImageRecord, ImageSnapshot, MutationResult, PublishedFile, RandpicError, SyncResult
 from .progress import SyncProgress
 from .utils import run_blocking
 from .web import GalleryPublisher
@@ -35,6 +35,10 @@ class RandpicService:
         self._worker: Optional[asyncio.Task] = None
         self.ready = False
         self._web_dirty = True
+        self._published_revision = -1
+        self._published_remote_enabled = False
+        self._manifest: Dict[str, PublishedFile] = {}
+        self._remote_dirty = True
         self._closed = False
 
     @property
@@ -93,19 +97,23 @@ class RandpicService:
                 finally:
                     await run_blocking(self.library.close)
 
-    async def _refresh_locked(self, *, force: bool = False, force_upload: bool = False) -> Optional[str]:
+    async def _refresh_locked(self, *, force: bool = False) -> Optional[str]:
         try:
-            revision, published = await run_blocking(self.repository.revision)
-            if not force and not force_upload and not self._web_dirty and revision == published:
+            revision = self.library.revision
+            remote_enabled = self.uploader is not None
+            if (not force and not self._web_dirty and revision == self._published_revision
+                    and remote_enabled == self._published_remote_enabled):
                 return None
             images = await run_blocking(self.repository.list_images)
             manifest = await run_blocking(
-                self.publisher.publish, images, list(self.commands), set(self.config.randpic_oss_no_upload_list)
+                self.publisher.publish, images, list(self.commands),
+                set(self.config.randpic_oss_no_upload_list), remote_enabled=remote_enabled,
             )
-            if self.uploader is not None:
-                await run_blocking(self.repository.reconcile_remote, manifest, force=force_upload)
-            await run_blocking(self.repository.published, revision)
+            self._manifest = manifest
+            self._published_revision = revision
+            self._published_remote_enabled = remote_enabled
             self._web_dirty = False
+            self._remote_dirty = remote_enabled
             return None
         except Exception as exc:
             self._web_dirty = True
@@ -156,7 +164,7 @@ class RandpicService:
             self._require_ready()
             snapshot = await run_blocking(self.library.pick, command)
             error = await self._refresh_locked()
-        if error:
+        if error or self._remote_dirty:
             self._wake.set()
         return snapshot
 
@@ -184,60 +192,100 @@ class RandpicService:
                 return SyncResult()
             async with self._mutation_lock:
                 self._require_ready()
-                error = await self._refresh_locked(force_upload=force)
+                error = await self._refresh_locked(force=force)
+                manifest = dict(self._manifest)
             if error:
-                return SyncResult(web_error=error)
-            if self.uploader is None:
+                return SyncResult(pending=1, web_error=error)
+            if self.uploader is None or (not force and not self._remote_dirty):
                 return SyncResult()
-            jobs = await run_blocking(self.repository.sync_jobs)
-            if not jobs:
-                return SyncResult()
-            succeeded = failed = completed = 0
+            self._remote_dirty = True
             started = asyncio.get_running_loop().time()
+            try:
+                remote = await self.uploader.list_files()
+            except Exception as exc:
+                logger.error(f'列举 OSS 文件失败，本轮未执行上传或删除，将自动重试：{exc}')
+                return SyncResult(failed=1, pending=1)
 
-            with SyncProgress(len(jobs)) as progress:
-                async def phase(items):
-                    queue = asyncio.Queue()
-                    for job in items:
-                        queue.put_nowait(job)
+            # 普通 PutObject 的 ETag 与 MD5 相同；大多数对象只需分页列表即可确认。
+            jobs = []
+            comparisons = []
+            failed_keys = set()
+            for key, file in manifest.items():
+                old = remote.get(key)
+                if force or old is None or old.size != file.size:
+                    jobs.append((key, file))
+                elif old.etag != file.etag:
+                    comparisons.append((key, file, old))
+            candidates = iter(comparisons)
 
-                    async def worker():
-                        nonlocal succeeded, failed, completed
-                        while not queue.empty():
-                            job = queue.get_nowait()
-                            try:
-                                if job.action == 'delete':
-                                    ok = await self.uploader.delete_file(job.key)
-                                else:
-                                    ok = await self.uploader.upload_file(job.local_path, job.key, job.content_hash)
-                                if ok:
-                                    await run_blocking(self.repository.complete_job, job)
-                                    succeeded += 1
-                                else:
-                                    await run_blocking(self.repository.fail_job, job, '远端请求失败或任务已过期')
-                                    failed += 1
-                            except Exception as exc:
-                                logger.error(f'同步 OSS 任务失败，已保留以便重试：{job.key} ({exc})')
-                                failed += 1
-                            finally:
-                                queue.task_done()
-                                completed += 1
-                                progress.update(completed, succeeded, failed)
+            async def compare_worker():
+                for key, file, old in candidates:
+                    try:
+                        if not await self.uploader.matches_file(key, file, old):
+                            jobs.append((key, file))
+                    except Exception as exc:
+                        failed_keys.add(key)
+                        logger.error(f'核对 OSS 文件失败，将自动重试：{key} ({exc})')
 
-                    await asyncio.gather(*(worker() for _ in range(min(self.config.randpic_upload_concurrency, len(items)))))
+            limit = self.config.randpic_upload_concurrency
+            await asyncio.gather(*(compare_worker() for _ in range(min(limit, len(comparisons)))))
+            jobs.extend((key, None) for key in remote.keys() - manifest.keys())
+            succeeded = completed = 0
 
-                # 先同步图片，再同步页面。
-                await phase([job for job in jobs if not job.key.endswith('.html')])
-                await phase([job for job in jobs if job.key.endswith('.html')])
-            pending = len(await run_blocking(self.repository.sync_jobs))
-            elapsed = asyncio.get_running_loop().time() - started
-            summary = (f'OSS 同步完成：成功 {succeeded}，失败 {failed}，待处理 {pending}，'
-                       f'用时 {elapsed:.1f} 秒')
-            if failed:
-                logger.warning(summary + '；失败任务将自动重试')
-            else:
-                logger.info(summary)
-            return SyncResult(succeeded=succeeded, failed=failed, pending=pending)
+            if jobs:
+                with SyncProgress(len(jobs)) as progress:
+                    async def phase(items):
+                        remaining = iter(items)
+
+                        async def worker():
+                            nonlocal succeeded, completed
+                            for key, file in remaining:
+                                try:
+                                    async with self._mutation_lock:
+                                        # 跳过被同步期间新操作替代的上传或删除。
+                                        if self._manifest.get(key) != file:
+                                            continue
+                                    if file is None:
+                                        ok = await self.uploader.delete_file(key)
+                                    else:
+                                        ok = await self.uploader.upload_file(file.path, key, file.content_hash)
+                                    if ok:
+                                        succeeded += 1
+                                    else:
+                                        failed_keys.add(key)
+                                except Exception as exc:
+                                    failed_keys.add(key)
+                                    logger.error(f'同步 OSS 文件失败，将自动重试：{key} ({exc})')
+                                finally:
+                                    completed += 1
+                                    progress.update(completed, succeeded, len(failed_keys))
+
+                        await asyncio.gather(*(worker() for _ in range(min(limit, len(items)))))
+
+                    # 先处理图片，再更新网页；网络期间不占用图库修改锁。
+                    await phase([job for job in jobs if not job[0].endswith('.html')])
+                    await phase([job for job in jobs if job[0].endswith('.html')])
+
+            async with self._mutation_lock:
+                pending_keys = failed_keys | {
+                    key for key in manifest.keys() | self._manifest.keys()
+                    if manifest.get(key) != self._manifest.get(key)
+                }
+                if self._web_dirty or self.library.revision != self._published_revision:
+                    pending_keys.add('<网页待发布>')
+                self._remote_dirty = bool(pending_keys)
+                changed = manifest != self._manifest
+            if changed:
+                self._wake.set()
+            if jobs or failed_keys:
+                elapsed = asyncio.get_running_loop().time() - started
+                summary = (f'OSS 同步完成：成功 {succeeded}，失败 {len(failed_keys)}，'
+                           f'待处理 {len(pending_keys)}，用时 {elapsed:.1f} 秒')
+                if failed_keys:
+                    logger.warning(summary + '；将重新比较远端内容后重试')
+                else:
+                    logger.info(summary)
+            return SyncResult(succeeded=succeeded, failed=len(failed_keys), pending=len(pending_keys))
 
     async def _retry_worker(self) -> None:
         while True:
@@ -248,6 +296,9 @@ class RandpicService:
             self._wake.clear()
             if self._closed:
                 return
+            if (not self._web_dirty and self.library.revision == self._published_revision
+                    and (self.uploader is None or not self._remote_dirty)):
+                continue
             try:
                 await self.sync()
             except Exception as exc:

@@ -4,41 +4,40 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import fields
 from pathlib import Path
-from typing import Iterator, List, Mapping, Optional, Tuple
+from typing import Iterator, List, Optional
 
-from .models import ImageRecord, RandpicError, SyncJob
+from .models import ImageRecord, RandpicError
 
 
 IMAGE_COLUMNS = ', '.join(field.name for field in fields(ImageRecord))
 SCHEMA = '''
-CREATE TABLE IF NOT EXISTS randpic_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS randpic_images (
     id TEXT PRIMARY KEY, command TEXT NOT NULL, filename TEXT NOT NULL,
-    content_hash TEXT NOT NULL, phash TEXT NOT NULL, send_count INTEGER NOT NULL DEFAULT 0 CHECK(send_count >= 0),
-    byte_size INTEGER NOT NULL DEFAULT 0, mtime_ns INTEGER NOT NULL DEFAULT 0,
-    deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0, 1)),
-    validated INTEGER NOT NULL DEFAULT 1 CHECK(validated IN (0, 1))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS randpic_image_path ON randpic_images(command, filename) WHERE deleted = 0;
-CREATE INDEX IF NOT EXISTS randpic_image_command ON randpic_images(command, deleted, id);
+    content_hash TEXT NOT NULL, phash TEXT NOT NULL,
+    send_count INTEGER NOT NULL DEFAULT 0 CHECK(send_count >= 0),
+    byte_size INTEGER NOT NULL DEFAULT 0 CHECK(byte_size >= 0),
+    deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN (0, 1))
+) WITHOUT ROWID;
+CREATE UNIQUE INDEX IF NOT EXISTS randpic_image_path
+    ON randpic_images(command, filename) WHERE deleted = 0;
+CREATE INDEX IF NOT EXISTS randpic_image_command
+    ON randpic_images(command, id) WHERE deleted = 0;
+CREATE INDEX IF NOT EXISTS randpic_image_hash
+    ON randpic_images(command, content_hash) WHERE deleted = 0;
 CREATE TABLE IF NOT EXISTS randpic_messages (
     bot_id TEXT NOT NULL, group_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
-    image_id TEXT NOT NULL REFERENCES randpic_images(id), PRIMARY KEY(bot_id, group_id, message_id)
-);
-CREATE TABLE IF NOT EXISTS randpic_sequences (command TEXT PRIMARY KEY, last_index INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS randpic_remote (key TEXT PRIMARY KEY, content_hash TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS randpic_sync_jobs (
-    key TEXT PRIMARY KEY, action TEXT NOT NULL CHECK(action IN ('upload', 'delete')),
-    local_path TEXT, content_hash TEXT NOT NULL, revision INTEGER NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT
-);
+    image_id TEXT NOT NULL REFERENCES randpic_images(id),
+    PRIMARY KEY(bot_id, group_id, message_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS randpic_sequences (
+    command TEXT PRIMARY KEY, last_index INTEGER NOT NULL CHECK(last_index >= 0)
+) WITHOUT ROWID;
 '''
 
 
 def _image(row: sqlite3.Row) -> ImageRecord:
     values = dict(row)
     values['deleted'] = bool(values['deleted'])
-    values['validated'] = bool(values['validated'])
     return ImageRecord(**values)
 
 
@@ -74,33 +73,16 @@ class Repository:
         finally:
             db.close()
 
-    @staticmethod
-    def meta(db: sqlite3.Connection, key: str, default: str = '0') -> str:
-        row = db.execute('SELECT value FROM randpic_meta WHERE key = ?', (key,)).fetchone()
-        return row[0] if row else default
-
-    @staticmethod
-    def set_meta(db: sqlite3.Connection, key: str, value: str) -> None:
-        db.execute('INSERT OR REPLACE INTO randpic_meta VALUES (?, ?)', (key, value))
-
-    def mark_dirty(self, db: sqlite3.Connection) -> None:
-        self.set_meta(db, 'catalog_revision', str(int(self.meta(db, 'catalog_revision')) + 1))
-
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
-            names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-            version = int(self.meta(db, 'schema_version')) if 'randpic_meta' in names else 0
-            if version > 2:
-                raise RandpicError('数据库来自更新版本的 Randpic，不能用 2.0.0 覆盖。')
             db.execute('PRAGMA journal_mode = WAL')
             db.execute('PRAGMA synchronous = FULL')
             db.executescript(SCHEMA)
-        with self.connection(write=True) as db:
-            if int(self.meta(db, 'schema_version')) == 0:
-                self.set_meta(db, 'schema_version', '2')
-                self.set_meta(db, 'published_revision', '-1')
-                self.mark_dirty(db)
+
+    @staticmethod
+    def mark_deleted(db: sqlite3.Connection, image_id: str) -> None:
+        db.execute('UPDATE randpic_images SET deleted = 1 WHERE id = ?', (image_id,))
 
     @staticmethod
     def upsert_image(db: sqlite3.Connection, image: ImageRecord) -> None:
@@ -145,9 +127,14 @@ class Repository:
 
     @staticmethod
     def duplicate(db: sqlite3.Connection, command: str, content_hash: str, phash: str) -> bool:
-        return db.execute('''SELECT 1 FROM randpic_images WHERE command = ? AND deleted = 0
-            AND (content_hash = ? OR hamming_distance(phash, ?) <= 5) LIMIT 1''',
-                          (command, content_hash, phash)).fetchone() is not None
+        exact = db.execute('''SELECT 1 FROM randpic_images
+            WHERE command = ? AND deleted = 0 AND content_hash = ? LIMIT 1''',
+                           (command, content_hash)).fetchone()
+        if exact is not None:
+            return True
+        return db.execute('''SELECT 1 FROM randpic_images
+            WHERE command = ? AND deleted = 0 AND hamming_distance(phash, ?) <= 5 LIMIT 1''',
+                          (command, phash)).fetchone() is not None
 
     @staticmethod
     def sequence(db: sqlite3.Connection, command: str) -> int:
@@ -179,53 +166,3 @@ class Repository:
         if row is None:
             raise RandpicError('找不到这条消息对应的图库图片，请引用本插件发送的图片。')
         return _image(row)
-
-    def revision(self) -> Tuple[int, int]:
-        with self.connection() as db:
-            return int(self.meta(db, 'catalog_revision')), int(self.meta(db, 'published_revision', '-1'))
-
-    def published(self, revision: int) -> None:
-        with self.connection(write=True) as db:
-            self.set_meta(db, 'published_revision', str(revision))
-
-    def reconcile_remote(self, manifest: Mapping[str, Tuple[str, str]], *, force: bool = False) -> None:
-        with self.connection(write=True) as db:
-            known = {row['key']: row['content_hash'] for row in db.execute('SELECT * FROM randpic_remote')}
-            jobs = {row['key']: row for row in db.execute('SELECT * FROM randpic_sync_jobs')}
-            revision = int(self.meta(db, 'sync_revision'))
-
-            def enqueue(key: str, action: str, path: Optional[str], content_hash: str) -> None:
-                nonlocal revision
-                old = jobs.get(key)
-                if old and (old['action'], old['local_path'], old['content_hash']) == (action, path, content_hash) and not force:
-                    return
-                revision += 1
-                db.execute('''INSERT OR REPLACE INTO randpic_sync_jobs
-                    (key, action, local_path, content_hash, revision) VALUES (?, ?, ?, ?, ?)''',
-                           (key, action, path, content_hash, revision))
-
-            for key, (path, content_hash) in manifest.items():
-                if force or known.get(key) != content_hash or key in jobs:
-                    enqueue(key, 'upload', path, content_hash)
-            for key in (set(known) | set(jobs)) - set(manifest):
-                enqueue(key, 'delete', None, '')
-            self.set_meta(db, 'sync_revision', str(revision))
-
-    def sync_jobs(self) -> List[SyncJob]:
-        with self.connection() as db:
-            return [SyncJob(row['key'], row['action'], row['local_path'], row['content_hash'], row['revision'])
-                    for row in db.execute('SELECT * FROM randpic_sync_jobs ORDER BY revision')]
-
-    def complete_job(self, job: SyncJob) -> None:
-        with self.connection(write=True) as db:
-            if job.action == 'delete':
-                db.execute('DELETE FROM randpic_remote WHERE key = ?', (job.key,))
-            else:
-                db.execute('INSERT OR REPLACE INTO randpic_remote VALUES (?, ?)', (job.key, job.content_hash))
-            # 老请求完成时，只能确认自己的版本，不能覆盖期间新加入的删除/上传任务。
-            db.execute('DELETE FROM randpic_sync_jobs WHERE key = ? AND revision = ?', (job.key, job.revision))
-
-    def fail_job(self, job: SyncJob, error: str) -> None:
-        with self.connection(write=True) as db:
-            db.execute('''UPDATE randpic_sync_jobs SET attempts = attempts + 1, last_error = ?
-                WHERE key = ? AND revision = ?''', (error[:500], job.key, job.revision))

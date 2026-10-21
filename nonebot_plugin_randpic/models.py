@@ -25,9 +25,7 @@ class ImageRecord:
     phash: str
     send_count: int = 0
     byte_size: int = 0
-    mtime_ns: int = 0
     deleted: bool = False
-    validated: bool = True
 
     @property
     def key(self) -> str:
@@ -49,12 +47,17 @@ class MutationResult:
 
 
 @dataclass(frozen=True)
-class SyncJob:
-    key: str
-    action: str
-    local_path: Optional[str]
+class PublishedFile:
+    path: str
     content_hash: str
-    revision: int
+    etag: str
+    size: int
+
+
+@dataclass(frozen=True)
+class RemoteObject:
+    size: int
+    etag: str
 
 
 @dataclass(frozen=True)
